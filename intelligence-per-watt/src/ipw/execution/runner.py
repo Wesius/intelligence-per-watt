@@ -247,23 +247,24 @@ class ProfilerRunner:
         ):
             return EnergyMetrics()
 
-        if self._baseline_energy is None:
-            self._baseline_energy = start_value
+        per_query_delta = end_value - start_value
+        per_query = per_query_delta if per_query_delta >= 0 else None
 
-        per_query = None
-        if self._last_energy_total is None:
-            # First query - use delta within this query
-            per_query = max(end_value - start_value, 0.0)
-        else:
-            # Subsequent queries - delta from last query's end
-            delta = end_value - self._last_energy_total
-            if delta < 0:
-                # Energy counter decreased - likely reset or data corruption
-                # Reset baseline and start fresh
-                self._baseline_energy = end_value
-                per_query = None
-            else:
-                per_query = delta
+        reset_in_window = per_query_delta < 0
+        reset_between_queries = (
+            not reset_in_window
+            and self._last_energy_total is not None
+            and end_value < self._last_energy_total
+        )
+
+        if reset_in_window:
+            # Counter rolled backwards while we were sampling – drop this reading
+            # and anchor future totals to the post-reset value.
+            self._baseline_energy = end_value
+        elif self._baseline_energy is None or reset_between_queries:
+            # Either the first reading we've seen or a reset that occurred while
+            # the system was idle between queries.
+            self._baseline_energy = start_value
 
         self._last_energy_total = end_value
 
@@ -373,6 +374,8 @@ class ProfilerRunner:
             "system_info": asdict(self._system_info) if self._system_info else None,
             "gpu_info": asdict(self._gpu_info) if self._gpu_info else None,
             "output_dir": str(output_path),
+            "profiler_config": _serialize_profiler_config(self._config),
+            "run_metadata": _jsonify(self._config.run_metadata),
         }
         summary_path = output_path / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2))
@@ -392,3 +395,24 @@ def _stat_summary(values: Iterable[Optional[float]]) -> MetricStats:
 
 def _slugify_model(model: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in model).strip("_") or "model"
+
+
+def _serialize_profiler_config(config: ProfilerConfig) -> dict[str, Any]:
+    """Convert the profiler config into a JSON-friendly mapping."""
+
+    config_dict = asdict(config)
+    # ``run_metadata`` is persisted separately for clarity
+    config_dict.pop("run_metadata", None)
+    return _jsonify(config_dict)
+
+
+def _jsonify(value: Any) -> Any:
+    """Recursively coerce values into JSON-serializable types."""
+
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _jsonify(val) for key, val in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_jsonify(item) for item in value]
+    return value

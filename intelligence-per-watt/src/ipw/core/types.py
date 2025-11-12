@@ -48,6 +48,7 @@ class ProfilerConfig:
     batch_size: int = 1
     max_queries: int | None = None
     additional_parameters: Mapping[str, Any] = field(default_factory=dict)
+    run_metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

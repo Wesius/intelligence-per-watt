@@ -19,7 +19,7 @@ src/ipw/
 
 ## Installation
 
-Install from the repository root:
+Install from the repository root when you only need the CLI:
 
 ```bash
 # from the repo root

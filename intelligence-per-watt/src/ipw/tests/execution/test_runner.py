@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -158,7 +159,12 @@ class TestProfilerRunner:
         # Check that output directory was created
         assert (tmp_path / "profile_UNKNOWN_HW_test_model").exists()
         # Check that summary.json was written
-        assert (tmp_path / "profile_UNKNOWN_HW_test_model" / "summary.json").exists()
+        summary_path = tmp_path / "profile_UNKNOWN_HW_test_model" / "summary.json"
+        assert summary_path.exists()
+
+        summary = json.loads(summary_path.read_text())
+        assert summary["profiler_config"]["model"] == "test-model"
+        assert summary["run_metadata"] == {}
 
     @patch("ipw.execution.runner.DatasetRegistry")
     @patch("ipw.execution.runner.ClientRegistry")
@@ -281,7 +287,7 @@ class TestProfilerRunner:
 
         assert metrics.per_query_joules == 50.0
 
-    def test_compute_energy_metrics_handles_counter_reset(self) -> None:
+    def test_compute_energy_metrics_handles_counter_reset_between_queries(self) -> None:
         config = ProfilerConfig(
             model="test",
             client_id="test",
@@ -303,7 +309,55 @@ class TestProfilerRunner:
         ]
         metrics = runner._compute_energy_metrics(readings2)
 
-        # Should handle reset gracefully
+        # Should measure per-query window delta despite reset while idle
+        assert metrics.per_query_joules == 50.0
+
+    def test_compute_energy_metrics_ignores_idle_energy_between_queries(self) -> None:
+        config = ProfilerConfig(
+            model="test",
+            client_id="test",
+            dataset_id="test",
+        )
+        runner = ProfilerRunner(config)
+
+        # First query establishes baseline
+        readings1 = [
+            TelemetryReading(energy_joules=100.0),
+            TelemetryReading(energy_joules=150.0),
+        ]
+        runner._compute_energy_metrics(readings1)
+
+        # Second query starts after unrelated energy consumption
+        readings2 = [
+            TelemetryReading(energy_joules=250.0),
+            TelemetryReading(energy_joules=260.0),
+        ]
+        metrics = runner._compute_energy_metrics(readings2)
+
+        assert metrics.per_query_joules == 10.0
+
+    def test_compute_energy_metrics_handles_counter_reset_within_query(self) -> None:
+        config = ProfilerConfig(
+            model="test",
+            client_id="test",
+            dataset_id="test",
+        )
+        runner = ProfilerRunner(config)
+
+        # First query establishes baseline
+        readings1 = [
+            TelemetryReading(energy_joules=100.0),
+            TelemetryReading(energy_joules=150.0),
+        ]
+        runner._compute_energy_metrics(readings1)
+
+        # Counter resets while the query is running
+        readings2 = [
+            TelemetryReading(energy_joules=200.0),
+            TelemetryReading(energy_joules=10.0),
+        ]
+        metrics = runner._compute_energy_metrics(readings2)
+
         assert metrics.per_query_joules is None
 
     def test_compute_energy_metrics_filters_infinite(self) -> None:
