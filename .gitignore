@@ -91,3 +91,5 @@ Desktop.ini
 *.tmp
 
 .pytest_cache/
+
+runs/
