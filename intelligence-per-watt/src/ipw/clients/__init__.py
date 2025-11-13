@@ -33,8 +33,7 @@ def _import_optional_client(module_name: str, client_id: str, extra: str) -> Non
             raise
         MISSING_CLIENTS[client_id] = (
             f"Requires optional dependency '{extra}'. "
-            f"Install from the repo root via `uv pip install -e 'intelligence-per-watt[{extra}]'` "
-            f"(or from inside the package directory via `uv pip install -e '.[{extra}]'`)."
+            f"Install from the repo root via `uv pip install -e 'intelligence-per-watt[{extra}]'`."
         )
 
 
