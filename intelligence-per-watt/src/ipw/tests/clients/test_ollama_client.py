@@ -3,6 +3,12 @@ from __future__ import annotations
 import os
 
 import pytest
+
+pytest.importorskip(
+    "ollama",
+    reason="Ollama client tests require the optional 'ollama' extra. Install via `uv pip install -e 'intelligence-per-watt[ollama]'`.",
+)
+
 from ipw.clients.ollama import OllamaClient
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")

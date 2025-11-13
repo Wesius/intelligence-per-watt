@@ -26,14 +26,24 @@ def list_clients() -> None:
     ipw.clients.ensure_registered()
 
     items = ClientRegistry.items()
+    missing = getattr(ipw.clients, "MISSING_CLIENTS", {})
 
-    if not items:
+    if not items and not missing:
         error("No clients registered")
         return
 
-    info("Clients:")
-    for client_id, client_cls in items:
-        info(f"  {client_id:20}")
+    if items:
+        info("Clients:")
+        for client_id, client_cls in items:
+            info(f"  {client_id:20}")
+    else:
+        error("No clients registered")
+
+    if missing:
+        info("")
+        info("Unavailable clients:")
+        for client_id, reason in sorted(missing.items()):
+            info(f"  {client_id:20} {reason}")
 
 
 @list_cmd.command("datasets", help="List available datasets")

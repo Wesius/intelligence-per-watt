@@ -22,6 +22,8 @@ uv run scripts/build_energy_monitor.py
 uv pip install -e intelligence-per-watt
 ```
 
+Optional inference clients ship as extras—install each one you need from the package directory, e.g. `uv pip install -e 'intelligence-per-watt[ollama]'` or `uv pip install -e 'intelligence-per-watt[vllm]'`.
+
 ## Quick Start
 
 ```bash

@@ -59,6 +59,12 @@ def profile(
     import ipw.datasets
 
     ipw.clients.ensure_registered()
+    missing_reason = getattr(ipw.clients, "MISSING_CLIENTS", {}).get(client_id)
+    if missing_reason:
+        raise click.ClickException(
+            f"Inference client '{client_id}' is unavailable: {missing_reason}"
+        )
+
     ipw.datasets.ensure_registered()
     from ipw.execution import ProfilerRunner  # Deferred import for heavy dependencies
 
