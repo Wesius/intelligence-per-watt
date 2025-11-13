@@ -19,10 +19,20 @@ src/ipw/
 
 ## Installation
 
-Install the published package when you only need the CLI:
+Install from the repository root when you only need the CLI:
 
 ```bash
-pip install ipw
+# from the repo root
+uv pip install -e intelligence-per-watt
+```
+
+Optional client dependencies live in extras so you only install what you need:
+
+```bash
+# from the repo root
+uv pip install -e 'intelligence-per-watt[ollama]'       # Enable the Ollama client
+uv pip install -e 'intelligence-per-watt[vllm]'         # Enable the vLLM offline client
+uv pip install -e 'intelligence-per-watt[all]'          # Pull in everything
 ```
 
 Development installation:
@@ -66,6 +76,8 @@ Intelligence Per Watt uses a centralized registry (`core/registry.py`) for compo
 ```bash
 ipw list all
 ```
+
+When optional client dependencies (e.g., `ollama`, `vllm`) are not installed, `ipw list clients` reports them under “Unavailable clients” with the extra (e.g., `uv pip install '.[ollama]'`) needed to enable them.
 
 ### Adding a New Client
 
