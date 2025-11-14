@@ -83,6 +83,6 @@ class OllamaClient(InferenceClient):
     ) -> dict[str, Any]:
         payload = dict(params)
         payload["model"] = model
-        payload.setdefault("prompt", prompt)
+        payload["prompt"] = prompt
         payload["stream"] = True
         return payload
