@@ -45,6 +45,24 @@ class _AsyncLoopRunner:
 
     def shutdown(self) -> None:
         if not self._loop.is_closed():
+
+            async def _drain():
+                current = asyncio.current_task()
+                tasks = [
+                    task
+                    for task in asyncio.all_tasks()
+                    if task is not current and not task.done()
+                ]
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+            try:
+                future = asyncio.run_coroutine_threadsafe(_drain(), self._loop)
+                future.result(timeout=5.0)
+            except Exception:
+                pass
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._thread.join(timeout=2.0)
             self._loop.close()
