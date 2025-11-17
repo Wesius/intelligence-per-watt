@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -158,7 +159,12 @@ class TestProfilerRunner:
         # Check that output directory was created
         assert (tmp_path / "profile_UNKNOWN_HW_test_model").exists()
         # Check that summary.json was written
-        assert (tmp_path / "profile_UNKNOWN_HW_test_model" / "summary.json").exists()
+        summary_path = tmp_path / "profile_UNKNOWN_HW_test_model" / "summary.json"
+        assert summary_path.exists()
+
+        summary = json.loads(summary_path.read_text())
+        assert summary["profiler_config"]["model"] == "test-model"
+        assert summary["run_metadata"] == {}
 
     @patch("ipw.execution.runner.DatasetRegistry")
     @patch("ipw.execution.runner.ClientRegistry")

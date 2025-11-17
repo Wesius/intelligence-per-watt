@@ -373,6 +373,8 @@ class ProfilerRunner:
             "system_info": asdict(self._system_info) if self._system_info else None,
             "gpu_info": asdict(self._gpu_info) if self._gpu_info else None,
             "output_dir": str(output_path),
+            "profiler_config": _serialize_profiler_config(self._config),
+            "run_metadata": _jsonify(self._config.run_metadata),
         }
         summary_path = output_path / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2))
@@ -392,3 +394,24 @@ def _stat_summary(values: Iterable[Optional[float]]) -> MetricStats:
 
 def _slugify_model(model: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in model).strip("_") or "model"
+
+
+def _serialize_profiler_config(config: ProfilerConfig) -> dict[str, Any]:
+    """Convert the profiler config into a JSON-friendly mapping."""
+
+    config_dict = asdict(config)
+    # ``run_metadata`` is persisted separately for clarity
+    config_dict.pop("run_metadata", None)
+    return _jsonify(config_dict)
+
+
+def _jsonify(value: Any) -> Any:
+    """Recursively coerce values into JSON-serializable types."""
+
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _jsonify(val) for key, val in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_jsonify(item) for item in value]
+    return value
