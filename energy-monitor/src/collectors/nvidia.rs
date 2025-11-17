@@ -81,7 +81,7 @@ impl NvidiaCollector {
                             }
                         }
                         VisibleDeviceSelector::Uuid(uuid) => {
-                            match nvml_static.device_by_uuid(&uuid) {
+                            match nvml_static.device_by_uuid(uuid.as_str()) {
                                 Ok(device) => {
                                     let index = device.index().ok();
                                     let name =
