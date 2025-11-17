@@ -92,8 +92,16 @@ class ProfilerRunner:
 
         self._ensure_client_ready(client)
 
-        with TelemetrySession(collector) as telemetry:
-            self._process_records(dataset, client, telemetry)
+        try:
+            with TelemetrySession(collector) as telemetry:
+                self._process_records(dataset, client, telemetry)
+        finally:
+            close_client = getattr(client, "close", None)
+            if callable(close_client):
+                try:
+                    close_client()
+                except Exception:
+                    pass
 
         if not self._records:
             return
