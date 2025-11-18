@@ -181,7 +181,11 @@ fn visible_device_filter_from_env() -> VisibleDeviceFilter {
     };
 
     let trimmed = raw_value.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+    if trimmed.is_empty() {
+        debug!("CUDA_VISIBLE_DEVICES is empty; no GPUs will be visible");
+        return VisibleDeviceFilter::None;
+    }
+    if trimmed.eq_ignore_ascii_case("all") {
         debug!("CUDA_VISIBLE_DEVICES specifies all GPUs");
         return VisibleDeviceFilter::All;
     }
