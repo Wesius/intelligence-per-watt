@@ -37,26 +37,79 @@ impl NvidiaCollector {
         debug!("NVML initialized successfully for energy monitoring");
         let nvml_static: &'static nvml_wrapper::Nvml = Box::leak(Box::new(nvml));
 
-        // Enumerate all devices
+        // Enumerate visible devices
         let count = nvml_static
             .device_count()
             .map_err(|e| anyhow::anyhow!("Failed to get NVIDIA device count: {}", e))?;
         debug!("NVML device count detected: {}", count);
 
+        let selectors = visible_device_filter_from_env();
         let mut devices: Vec<nvml_wrapper::Device<'static>> = Vec::new();
         let mut names: Vec<String> = Vec::new();
-        for i in 0..count {
-            match nvml_static.device_by_index(i) {
-                Ok(dev) => {
-                    let name = dev.name().unwrap_or_else(|_| "Unknown GPU".to_string());
-                    let idx = dev.index().unwrap_or(i as u32);
-                    debug!("Detected NVIDIA GPU {}: {}", idx, name);
-                    names.push(name);
-                    devices.push(dev);
+
+        match selectors {
+            VisibleDeviceFilter::List(filters) => {
+                debug!(
+                    "GPU visibility filter resolved to {} selector(s)",
+                    filters.len()
+                );
+                for selector in filters {
+                    match selector {
+                        VisibleDeviceSelector::Index(idx) => {
+                            if idx >= count {
+                                debug!(
+                                    "Skipping NVIDIA GPU index {} (out of bounds for count {})",
+                                    idx, count
+                                );
+                                continue;
+                            }
+                            match nvml_static.device_by_index(idx) {
+                                Ok(device) => {
+                                    let index = device.index().ok();
+                                    let name =
+                                        device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
+                                    debug!(index, "Using NVIDIA GPU {}", name);
+                                    names.push(name);
+                                    devices.push(device);
+                                }
+                                Err(e) => {
+                                    debug!(
+                                        "Skipping NVIDIA GPU at filtered index {} due to error: {}",
+                                        idx, e
+                                    );
+                                }
+                            }
+                        }
+                        VisibleDeviceSelector::Uuid(uuid) => {
+                            match nvml_static.device_by_uuid(uuid.as_str()) {
+                                Ok(device) => {
+                                    let index = device.index().ok();
+                                    let name =
+                                        device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
+                                    debug!(index, "Using NVIDIA GPU {}", name);
+                                    names.push(name);
+                                    devices.push(device);
+                                }
+                                Err(e) => {
+                                    debug!("Skipping NVIDIA GPU UUID {} due to error: {}", uuid, e);
+                                }
+                            }
+                        }
+                    }
                 }
-                Err(e) => {
-                    debug!("Skipping NVIDIA GPU at index {} due to error: {}", i, e);
+
+                if devices.is_empty() {
+                    debug!(
+                        "CUDA_VISIBLE_DEVICES filter matched no GPUs; falling back to all visible GPUs"
+                    );
+                    enumerate_all_gpus(nvml_static, count, &mut devices, &mut names);
                 }
+            }
+            VisibleDeviceFilter::All => {
+                enumerate_all_gpus(nvml_static, count, &mut devices, &mut names);
+            }
+            VisibleDeviceFilter::None => {
+                // Intentionally leave devices empty; user explicitly requested none.
             }
         }
 
@@ -103,6 +156,90 @@ impl NvidiaCollector {
         };
 
         Ok(collector)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug)]
+enum VisibleDeviceSelector {
+    Index(u32),
+    Uuid(String),
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Debug)]
+enum VisibleDeviceFilter {
+    All,
+    None,
+    List(Vec<VisibleDeviceSelector>),
+}
+
+#[cfg(not(target_os = "macos"))]
+fn visible_device_filter_from_env() -> VisibleDeviceFilter {
+    let Ok(raw_value) = std::env::var("CUDA_VISIBLE_DEVICES") else {
+        return VisibleDeviceFilter::All;
+    };
+
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        debug!("CUDA_VISIBLE_DEVICES is empty; no GPUs will be visible");
+        return VisibleDeviceFilter::None;
+    }
+    if trimmed.eq_ignore_ascii_case("all") {
+        debug!("CUDA_VISIBLE_DEVICES specifies all GPUs");
+        return VisibleDeviceFilter::All;
+    }
+    if trimmed.eq_ignore_ascii_case("none")
+        || trimmed.eq_ignore_ascii_case("void")
+        || trimmed.eq_ignore_ascii_case("nodevfiles")
+    {
+        debug!("CUDA_VISIBLE_DEVICES requested no visible GPUs");
+        return VisibleDeviceFilter::None;
+    }
+
+    let mut selectors = Vec::new();
+    for token in trimmed.split(',') {
+        let token_trimmed = token.trim();
+        if token_trimmed.is_empty() {
+            continue;
+        }
+        match token_trimmed.parse::<u32>() {
+            Ok(idx) => selectors.push(VisibleDeviceSelector::Index(idx)),
+            Err(_) => selectors.push(VisibleDeviceSelector::Uuid(token_trimmed.to_string())),
+        }
+    }
+
+    if selectors.is_empty() {
+        debug!(
+            "No valid entries in CUDA_VISIBLE_DEVICES='{}'; falling back to all GPUs",
+            raw_value
+        );
+        VisibleDeviceFilter::All
+    } else {
+        VisibleDeviceFilter::List(selectors)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn enumerate_all_gpus(
+    nvml: &'static nvml_wrapper::Nvml,
+    count: u32,
+    devices: &mut Vec<nvml_wrapper::Device<'static>>,
+    names: &mut Vec<String>,
+) {
+    for i in 0..count {
+        match nvml.device_by_index(i) {
+            Ok(device) => {
+                let index = device.index().ok();
+                let name = device.name().unwrap_or_else(|_| "Unknown GPU".to_string());
+                debug!(index, "Using NVIDIA GPU {}", name);
+                names.push(name);
+                devices.push(device);
+            }
+            Err(e) => {
+                debug!("Skipping NVIDIA GPU at index {} due to error: {}", i, e);
+            }
+        }
     }
 }
 

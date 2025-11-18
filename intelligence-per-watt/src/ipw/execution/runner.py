@@ -92,8 +92,16 @@ class ProfilerRunner:
 
         self._ensure_client_ready(client)
 
-        with TelemetrySession(collector) as telemetry:
-            self._process_records(dataset, client, telemetry)
+        try:
+            with TelemetrySession(collector) as telemetry:
+                self._process_records(dataset, client, telemetry)
+        finally:
+            close_client = getattr(client, "close", None)
+            if callable(close_client):
+                try:
+                    close_client()
+                except Exception:
+                    pass
 
         if not self._records:
             return
@@ -247,23 +255,24 @@ class ProfilerRunner:
         ):
             return EnergyMetrics()
 
-        if self._baseline_energy is None:
-            self._baseline_energy = start_value
+        per_query_delta = end_value - start_value
+        per_query = per_query_delta if per_query_delta >= 0 else None
 
-        per_query = None
-        if self._last_energy_total is None:
-            # First query - use delta within this query
-            per_query = max(end_value - start_value, 0.0)
-        else:
-            # Subsequent queries - delta from last query's end
-            delta = end_value - self._last_energy_total
-            if delta < 0:
-                # Energy counter decreased - likely reset or data corruption
-                # Reset baseline and start fresh
-                self._baseline_energy = end_value
-                per_query = None
-            else:
-                per_query = delta
+        reset_in_window = per_query_delta < 0
+        reset_between_queries = (
+            not reset_in_window
+            and self._last_energy_total is not None
+            and end_value < self._last_energy_total
+        )
+
+        if reset_in_window:
+            # Counter rolled backwards while we were sampling – drop this reading
+            # and anchor future totals to the post-reset value.
+            self._baseline_energy = end_value
+        elif self._baseline_energy is None or reset_between_queries:
+            # Either the first reading we've seen or a reset that occurred while
+            # the system was idle between queries.
+            self._baseline_energy = start_value
 
         self._last_energy_total = end_value
 

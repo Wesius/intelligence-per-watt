@@ -5,7 +5,6 @@ use async_process::{Command, Stdio};
 use async_trait::async_trait;
 use futures::io::AsyncReadExt;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use super::{CollectorSample, TelemetryCollector};
@@ -14,7 +13,6 @@ use crate::energy::GpuInfo;
 /// macOS telemetry collector using powermetrics
 pub struct MacOSCollector {
     child: Arc<Mutex<Option<async_process::Child>>>,
-    last_timestamp: Arc<Mutex<Option<Instant>>>,
     accumulated_energy_j: Arc<Mutex<f64>>,
     last_power_w: Arc<Mutex<f64>>,
     available: Arc<Mutex<bool>>,
@@ -47,7 +45,6 @@ impl MacOSCollector {
                 );
                 return Ok(Self {
                     child: Arc::new(Mutex::new(None)),
-                    last_timestamp: Arc::new(Mutex::new(None)),
                     accumulated_energy_j: Arc::new(Mutex::new(0.0)),
                     last_power_w: Arc::new(Mutex::new(0.0)),
                     available: Arc::new(Mutex::new(false)),
@@ -60,7 +57,6 @@ impl MacOSCollector {
                 warn!("powermetrics exited immediately with status: {:?}", status);
                 return Ok(Self {
                     child: Arc::new(Mutex::new(None)),
-                    last_timestamp: Arc::new(Mutex::new(None)),
                     accumulated_energy_j: Arc::new(Mutex::new(0.0)),
                     last_power_w: Arc::new(Mutex::new(0.0)),
                     available: Arc::new(Mutex::new(false)),
@@ -74,37 +70,30 @@ impl MacOSCollector {
 
         Ok(Self {
             child: Arc::new(Mutex::new(Some(child))),
-            last_timestamp: Arc::new(Mutex::new(None)),
             accumulated_energy_j: Arc::new(Mutex::new(0.0)),
             last_power_w: Arc::new(Mutex::new(0.0)),
             available: Arc::new(Mutex::new(true)),
         })
     }
 
-    fn extract_power_watts(plist_value: &plist::Value) -> Option<f64> {
-        if let Some(dict) = plist_value.as_dictionary() {
-            if let Some(processor_power) = dict.get("processor_power") {
-                if let Some(processor_dict) = processor_power.as_dictionary() {
-                    if let Some(actual) = processor_dict.get("actual") {
-                        if let Some(power_mw) = actual.as_real() {
-                            return Some(power_mw / 1000.0);
-                        }
-                    }
-                }
-            }
+    fn extract_gpu_metrics(plist_value: &plist::Value) -> Option<(f64, f64)> {
+        let dict = plist_value.as_dictionary()?;
+        let processor = dict.get("processor")?.as_dictionary()?;
+        let power_mw = processor.get("gpu_power").and_then(Self::value_as_f64)?;
+        let energy_mj = processor.get("gpu_energy").and_then(Self::value_as_f64)?;
+        Some((power_mw / 1000.0, energy_mj / 1000.0))
+    }
 
-            if let Some(processor) = dict.get("processor") {
-                if let Some(processor_dict) = processor.as_dictionary() {
-                    if let Some(combined_power) = processor_dict.get("combined_power") {
-                        if let Some(power_mw) = combined_power.as_real() {
-                            return Some(power_mw / 1000.0);
-                        }
-                    }
-                }
-            }
+    fn value_as_f64(value: &plist::Value) -> Option<f64> {
+        if let Some(real) = value.as_real() {
+            Some(real)
+        } else if let Some(integer) = value.as_signed_integer() {
+            Some(integer as f64)
+        } else if let Some(uinteger) = value.as_unsigned_integer() {
+            Some(uinteger as f64)
+        } else {
+            None
         }
-
-        None
     }
 
     async fn measure_power(&self) -> Result<f64> {
@@ -163,20 +152,12 @@ impl MacOSCollector {
 
             if !buffer.is_empty() && found_start {
                 if let Ok(plist_value) = plist::Value::from_reader_xml(&buffer[..]) {
-                    if let Some(power_watts) = Self::extract_power_watts(&plist_value) {
+                    if let Some((power_watts, energy_joules_delta)) =
+                        Self::extract_gpu_metrics(&plist_value)
+                    {
                         *self.last_power_w.lock().unwrap() = power_watts;
-
-                        let now = Instant::now();
-                        let mut timestamp_guard = self.last_timestamp.lock().unwrap();
                         let mut energy_guard = self.accumulated_energy_j.lock().unwrap();
-
-                        if let Some(last_ts) = *timestamp_guard {
-                            let duration_secs = now.duration_since(last_ts).as_secs_f64();
-                            let energy_delta = power_watts * duration_secs;
-                            *energy_guard += energy_delta;
-                        }
-
-                        *timestamp_guard = Some(now);
+                        *energy_guard += energy_joules_delta;
 
                         {
                             let mut child_guard = self.child.lock().unwrap();

@@ -55,7 +55,11 @@ class TelemetrySession(AbstractContextManager["TelemetrySession"]):
     def _run(self) -> None:
         try:
             for reading in self._collector.stream_readings():
-                timestamp = time.time()
+                timestamp = (
+                    float(reading.timestamp_nanos) / 1_000_000_000.0
+                    if reading.timestamp_nanos is not None
+                    else time.time()
+                )
                 self._samples.append(
                     TelemetrySample(timestamp=timestamp, reading=reading)
                 )
