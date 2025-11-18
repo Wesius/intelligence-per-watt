@@ -172,7 +172,7 @@ class TestProfilerRunner:
 
         summary = json.loads(summary_path.read_text())
         assert summary["profiler_config"]["model"] == "test-model"
-        assert summary["run_metadata"] == {}
+        assert summary["profiler_config"]["run_metadata"] == {}
 
     def test_compute_response_time_windows_prefers_offsets(self) -> None:
         config = ProfilerConfig(
