@@ -21,6 +21,8 @@ class Response:
     content: str
     usage: ChatUsage
     time_to_first_token_ms: float
+    batch_start_offset_ms: Optional[float] = None
+    batch_end_offset_ms: Optional[float] = None
 
 
 @dataclass(slots=True)

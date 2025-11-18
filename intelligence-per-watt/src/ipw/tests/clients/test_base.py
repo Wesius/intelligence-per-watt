@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Sequence
+from unittest.mock import patch
 
 import pytest
 from ipw.clients.base import InferenceClient
@@ -102,3 +103,24 @@ class TestInferenceClient:
 
         assert client.received_params["temperature"] == 0.7
         assert client.received_params["top_p"] == 0.9
+
+    def test_batch_method_defaults_to_sequential_calls(self) -> None:
+        client = ConcreteClient("http://localhost")
+
+        with patch.object(
+            client, "stream_chat_completion", wraps=client.stream_chat_completion
+        ) as mock_single:
+            responses = client.stream_chat_completion_batch(
+                "model",
+                ["prompt-1", "prompt-2"],
+                temperature=0.3,
+            )
+
+        assert mock_single.call_count == 2
+        assert len(responses) == 2
+        for call in mock_single.call_args_list:
+            assert call.kwargs["temperature"] == 0.3
+        assert responses[0].batch_start_offset_ms is not None
+        assert responses[0].batch_end_offset_ms is not None
+        assert responses[0].batch_start_offset_ms <= responses[0].batch_end_offset_ms
+        assert responses[1].batch_start_offset_ms >= responses[0].batch_end_offset_ms

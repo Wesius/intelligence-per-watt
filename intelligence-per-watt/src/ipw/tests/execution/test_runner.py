@@ -18,6 +18,14 @@ from ipw.execution.runner import ProfilerRunner, _slugify_model, _stat_summary
 from ipw.execution.telemetry_session import TelemetrySample
 
 
+def _build_response(content: str = "response") -> Response:
+    return Response(
+        content=content,
+        usage=ChatUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        time_to_first_token_ms=100.0,
+    )
+
+
 class TestStatSummary:
     """Test statistical summary computation."""
 
@@ -165,6 +173,122 @@ class TestProfilerRunner:
         summary = json.loads(summary_path.read_text())
         assert summary["profiler_config"]["model"] == "test-model"
         assert summary["run_metadata"] == {}
+
+    def test_compute_response_time_windows_prefers_offsets(self) -> None:
+        config = ProfilerConfig(
+            model="test-model",
+            client_id="client",
+            dataset_id="dataset",
+        )
+        runner = ProfilerRunner(config)
+        responses = [_build_response("a"), _build_response("b")]
+        responses[0].batch_start_offset_ms = 0.0
+        responses[0].batch_end_offset_ms = 120.0
+        responses[1].batch_start_offset_ms = 200.0
+        responses[1].batch_end_offset_ms = 600.0
+
+        windows = runner._compute_response_time_windows(10.0, 11.0, responses)
+
+        assert len(windows) == 2
+        assert windows[0][0] == pytest.approx(10.0)
+        assert windows[0][1] == pytest.approx(10.12)
+        assert windows[1][0] == pytest.approx(10.2)
+        assert windows[1][1] == pytest.approx(10.6)
+
+    def test_compute_response_time_windows_falls_back_to_even_split(self) -> None:
+        config = ProfilerConfig(
+            model="test-model",
+            client_id="client",
+            dataset_id="dataset",
+        )
+        runner = ProfilerRunner(config)
+        responses = [_build_response("a"), _build_response("b"), _build_response("c")]
+
+        windows = runner._compute_response_time_windows(0.0, 3.0, responses)
+
+        assert windows == [
+            (0.0, 1.0),
+            (1.0, 2.0),
+            (2.0, 3.0),
+        ]
+
+    def test_assign_samples_to_windows_uses_boundaries(self) -> None:
+        config = ProfilerConfig(
+            model="test-model",
+            client_id="client",
+            dataset_id="dataset",
+        )
+        runner = ProfilerRunner(config)
+        samples = [
+            TelemetrySample(timestamp=0.1, reading=TelemetryReading()),
+            TelemetrySample(timestamp=0.3, reading=TelemetryReading()),
+            TelemetrySample(timestamp=0.35, reading=TelemetryReading()),
+            TelemetrySample(timestamp=0.8, reading=TelemetryReading()),
+        ]
+        windows = [(0.0, 0.25), (0.25, 0.6), (0.6, 1.0)]
+
+        partitions = runner._assign_samples_to_windows(samples, windows)
+
+        assert len(partitions) == 3
+        assert len(partitions[0]) == 1
+        assert len(partitions[1]) == 2
+        assert len(partitions[2]) == 1
+
+    @patch("ipw.execution.runner.tqdm")
+    def test_process_records_batches_requests_when_configured(
+        self,
+        mock_tqdm: Mock,
+    ) -> None:
+        class DummyDataset:
+            def __init__(self, records):
+                self._records = records
+
+            def size(self) -> int:
+                return len(self._records)
+
+            def __iter__(self):
+                return iter(self._records)
+
+        records = [
+            DatasetRecord(problem=f"prompt-{idx}", answer="", subject="math")
+            for idx in range(3)
+        ]
+        dataset = DummyDataset(records)
+
+        telemetry = Mock()
+        telemetry.window.side_effect = lambda *_: []
+
+        client = Mock()
+        client.stream_chat_completion = Mock()
+        client.stream_chat_completion_batch.side_effect = [
+            [_build_response("a"), _build_response("b")],
+            [_build_response("c")],
+        ]
+
+        config = ProfilerConfig(
+            model="test-model",
+            client_id="test-client",
+            dataset_id="test-dataset",
+            batch_size=2,
+        )
+        runner = ProfilerRunner(config)
+
+        progress = Mock()
+        mock_cm = MagicMock()
+        mock_cm.__enter__.return_value = progress
+        mock_cm.__exit__.return_value = None
+        mock_tqdm.return_value = mock_cm
+
+        runner._process_records(dataset, client, telemetry)
+
+        assert client.stream_chat_completion.call_count == 0
+        assert client.stream_chat_completion_batch.call_count == 2
+        assert [record.problem for record in runner._records] == [
+            "prompt-0",
+            "prompt-1",
+            "prompt-2",
+        ]
+        assert len(runner._records) == 3
 
     @patch("ipw.execution.runner.DatasetRegistry")
     @patch("ipw.execution.runner.ClientRegistry")

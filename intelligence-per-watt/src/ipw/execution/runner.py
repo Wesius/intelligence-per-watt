@@ -116,20 +116,75 @@ class ProfilerRunner:
     ) -> None:
         total_queries = self._config.max_queries or dataset.size()
         iterator = enumerate(dataset)
+        batch_size = max(int(self._config.batch_size or 1), 1)
+
         with tqdm(total=total_queries, desc="Profiling", unit="query") as progress:
+            if batch_size == 1:
+                for index, record in iterator:
+                    if index >= total_queries:
+                        break
+                    start = time.time()
+                    response = self._invoke_client(client, record)
+                    end = time.time()
+                    samples = list(telemetry.window(start, end))
+                    built = self._build_record(
+                        index, record, response, samples, start, end
+                    )
+                    if built is not None:
+                        self._records.append(built)
+                        if len(self._records) % self._FLUSH_INTERVAL == 0:
+                            self._persist_records(dataset)
+                    progress.update(1)
+                return
+
+            batch_records: list[tuple[int, DatasetRecord]] = []
             for index, record in iterator:
                 if index >= total_queries:
                     break
-                start = time.time()
-                response = self._invoke_client(client, record)
-                end = time.time()
-                samples = list(telemetry.window(start, end))
-                built = self._build_record(index, record, response, samples, start, end)
-                if built is not None:
-                    self._records.append(built)
-                    if len(self._records) % self._FLUSH_INTERVAL == 0:
-                        self._persist_records(dataset)
-                progress.update(1)
+                batch_records.append((index, record))
+                if len(batch_records) == batch_size:
+                    self._process_batch_records(
+                        dataset, client, telemetry, batch_records
+                    )
+                    progress.update(len(batch_records))
+                    batch_records = []
+
+            if batch_records:
+                self._process_batch_records(dataset, client, telemetry, batch_records)
+                progress.update(len(batch_records))
+
+    def _process_batch_records(
+        self,
+        dataset,
+        client,
+        telemetry: TelemetrySession,
+        batch_records: Sequence[tuple[int, DatasetRecord]],
+    ) -> None:
+        record_payloads = [record for _, record in batch_records]
+        start = time.time()
+        responses = list(self._invoke_client_batch(client, record_payloads))
+        end = time.time()
+
+        if len(responses) != len(batch_records):
+            raise RuntimeError(
+                f"Client returned {len(responses)} responses for batch of {len(batch_records)}"
+            )
+
+        batch_samples = list(telemetry.window(start, end))
+        time_windows = self._compute_response_time_windows(start, end, responses)
+        sample_windows = self._assign_samples_to_windows(batch_samples, time_windows)
+
+        for idx, ((record_index, record), response, samples) in enumerate(
+            zip(batch_records, responses, sample_windows)
+        ):
+            start_time, end_time = time_windows[idx]
+            built = self._build_record(
+                record_index, record, response, samples, start_time, end_time
+            )
+            if built is not None:
+                self._records.append(built)
+                if len(self._records) % self._FLUSH_INTERVAL == 0:
+                    self._persist_records(dataset)
 
     def _build_record(
         self,
@@ -320,6 +375,105 @@ class ProfilerRunner:
         return client.stream_chat_completion(
             self._config.model, record.problem, **payload
         )
+
+    def _invoke_client_batch(
+        self, client, records: Sequence[DatasetRecord]
+    ) -> Sequence[Response]:
+        payload: MutableMapping[str, object] = dict(self._config.additional_parameters)
+        prompts = [record.problem for record in records]
+        return client.stream_chat_completion_batch(
+            self._config.model, prompts, **payload
+        )
+
+    def _compute_response_time_windows(
+        self,
+        batch_start_time: float,
+        batch_end_time: float,
+        responses: Sequence[Response],
+    ) -> list[tuple[float, float]]:
+        segments = len(responses)
+        if segments == 0:
+            return []
+
+        duration = max(batch_end_time - batch_start_time, 0.0)
+        if duration <= 0.0:
+            return [(batch_start_time, batch_end_time) for _ in responses]
+
+        fallback_step = duration / segments
+        fallback_windows: list[tuple[float, float]] = []
+        for idx in range(segments):
+            start = batch_start_time + idx * fallback_step
+            end = batch_end_time if idx == segments - 1 else batch_start_time + (
+                (idx + 1) * fallback_step
+            )
+            fallback_windows.append((start, min(end, batch_end_time)))
+
+        windows: list[tuple[float, float]] = []
+        for idx, response in enumerate(responses):
+            start_offset = (
+                response.batch_start_offset_ms / 1000.0
+                if response.batch_start_offset_ms is not None
+                else None
+            )
+            end_offset = (
+                response.batch_end_offset_ms / 1000.0
+                if response.batch_end_offset_ms is not None
+                else None
+            )
+
+            start_time = (
+                batch_start_time + start_offset
+                if start_offset is not None
+                else fallback_windows[idx][0]
+            )
+            start_time = max(batch_start_time, start_time)
+
+            if end_offset is not None:
+                end_time = batch_start_time + end_offset
+            elif (
+                idx + 1 < segments
+                and responses[idx + 1].batch_start_offset_ms is not None
+            ):
+                end_time = batch_start_time + (
+                    responses[idx + 1].batch_start_offset_ms / 1000.0
+                )
+            else:
+                end_time = fallback_windows[idx][1]
+
+            if windows:
+                start_time = max(start_time, windows[-1][1])
+            end_time = max(start_time, min(end_time, batch_end_time))
+
+            windows.append((start_time, end_time))
+
+        return windows
+
+    def _assign_samples_to_windows(
+        self,
+        samples: Sequence[TelemetrySample],
+        windows: Sequence[tuple[float, float]],
+    ) -> list[list[TelemetrySample]]:
+        if not windows:
+            return []
+
+        partitions: list[list[TelemetrySample]] = [[] for _ in windows]
+        window_index = 0
+
+        for sample in samples:
+            timestamp = sample.timestamp
+            while (
+                window_index < len(windows) and timestamp > windows[window_index][1]
+            ):
+                window_index += 1
+
+            if window_index >= len(windows):
+                break
+
+            start, end = windows[window_index]
+            if start <= timestamp <= end:
+                partitions[window_index].append(sample)
+
+        return partitions
 
     def _resolve_dataset(self, dataset_id: str, params: Mapping[str, Any]):
         try:

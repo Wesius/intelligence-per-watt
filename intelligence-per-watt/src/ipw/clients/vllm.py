@@ -124,6 +124,49 @@ class VLLMClient(InferenceClient):
             )
         )
 
+    def stream_chat_completion_batch(
+        self, model: str, prompts: Sequence[str], **params: Any
+    ) -> Sequence[Response]:
+        if self._closed:
+            raise RuntimeError("vLLM client has been closed")
+        self._ensure_engine(model)
+        self._warmup_if_needed()
+
+        prompt_list = list(prompts)
+        if not prompt_list:
+            return []
+
+        sampling_params = self._build_sampling_params(params)
+        runner = self._loop_runner
+        if runner is None:
+            raise RuntimeError("vLLM client is shut down")
+
+        async def _run_batch() -> list[Response]:
+            batch_start = time.perf_counter()
+
+            async def _run_single(index: int, prompt: str) -> tuple[int, Response]:
+                request_id = f"{uuid.uuid4()}-{index}"
+                single_start = time.perf_counter()
+                response = await self._stream_response(
+                    prompt=prompt,
+                    request_id=request_id,
+                    sampling_params=sampling_params,
+                )
+                single_end = time.perf_counter()
+                response.batch_start_offset_ms = (
+                    (single_start - batch_start) * 1000.0
+                )
+                response.batch_end_offset_ms = (single_end - batch_start) * 1000.0
+                return index, response
+
+            results = await asyncio.gather(
+                *(_run_single(idx, prompt) for idx, prompt in enumerate(prompt_list))
+            )
+            results.sort(key=lambda item: item[0])
+            return [response for _, response in results]
+
+        return runner.run(_run_batch())
+
     def list_models(self) -> Sequence[str]:
         return [self._model_name] if self._model_name else []
 
