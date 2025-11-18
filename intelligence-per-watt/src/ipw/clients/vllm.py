@@ -45,6 +45,7 @@ class _AsyncLoopRunner:
 
     def shutdown(self) -> None:
         if not self._loop.is_closed():
+
             async def _drain():
                 current = asyncio.current_task()
                 tasks = [
