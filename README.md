@@ -8,6 +8,12 @@ A benchmarking suite for LLM inference systems. Intelligence Per Watt sends work
 
 ## Installation
 
+### Prerequisites
+- [Rust compiler](https://www.rust-lang.org/tools/install) (for building energy monitor)
+- [Protocol Buffer compiler](https://protobuf.dev/installation/) (`protoc`)
+- [Ollama](https://ollama.ai/) or [vLLM](https://docs.vllm.ai/) (inference client)
+
+### Setup
 ```bash
 git clone https://github.com/HazyResearch/intelligence-per-watt.git
 
