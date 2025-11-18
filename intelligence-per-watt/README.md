@@ -97,9 +97,11 @@ class CustomClient(InferenceClient):
     def __init__(self, base_url: str | None = None, **config):
         super().__init__(base_url or "http://localhost:8000", **config)
         
-    def stream_chat_completion(self, model: str, prompt: str, **params) -> Response:
-        # Implement streaming chat completion, return as a Response type.
-        pass
+    def run_concurrent(self, model: str, prompt_iter, max_in_flight, **params):
+        # Consume (index, prompt) pairs and yield (index, Response) as they finish.
+        # Each Response must include request_start_time/request_end_time.
+        for index, prompt in prompt_iter:
+            yield index, Response(...)
         
     def list_models(self) -> list[str]:
         # Return available models

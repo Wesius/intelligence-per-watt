@@ -3,7 +3,7 @@
 Run a handful of example generations against an Intelligence Per Watt client.
 
 This helper is intended for quick manual smoke testing. It exercises the
-configured client using ``stream_chat_completion`` so that time-to-first-token
+configured client using the streaming concurrency API so that time-to-first-token
 and token accounting behave the same way as in the profiling harness.
 """
 
@@ -69,7 +69,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="KEY=VALUE",
         action="append",
         default=[],
-        help="Additional request parameters for stream_chat_completion (JSON parsed).",
+        help="Additional request parameters for the concurrent runner (JSON parsed).",
     )
     parser.add_argument(
         "prompts",
@@ -105,8 +105,8 @@ def main(argv: list[str] | None = None) -> int:
             print("-" * len(header))
 
             try:
-                response = client.stream_chat_completion(
-                    args.model, prompt, **request_params
+                response = _run_single_request(
+                    client, args.model, prompt, request_params
                 )
             except Exception as exc:  # pragma: no cover - interactive use
                 print(f"Request failed: {exc}", file=sys.stderr)
@@ -129,6 +129,16 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     return 0
+
+
+def _run_single_request(
+    client, model: str, prompt: str, params: dict[str, Any]
+) -> Any:
+    for _, response in client.run_concurrent(
+        model, [(0, prompt)], max_in_flight=1, **params
+    ):
+        return response
+    raise RuntimeError("client produced no response")
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entrypoint

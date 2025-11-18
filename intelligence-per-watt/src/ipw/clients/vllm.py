@@ -9,7 +9,8 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Any, Sequence
+from queue import Queue
+from typing import Any, Iterable, Iterator, Sequence, Tuple
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -40,8 +41,11 @@ class _AsyncLoopRunner:
         self._thread.start()
 
     def run(self, coro) -> Any:
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        future = self.submit(coro)
         return future.result()
+
+    def submit(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def shutdown(self) -> None:
         if not self._loop.is_closed():
@@ -106,67 +110,47 @@ class VLLMClient(InferenceClient):
         self._ensure_engine(model)
         self._warmup_if_needed()
 
-    def stream_chat_completion(
-        self, model: str, prompt: str, **params: Any
-    ) -> Response:
+    def run_concurrent(
+        self,
+        model: str,
+        prompt_iter: Iterable[Tuple[int, str]],
+        max_in_flight: int,
+        **params: Any,
+    ) -> Iterator[Tuple[int, Response]]:
         if self._closed:
             raise RuntimeError("vLLM client has been closed")
         self._ensure_engine(model)
         self._warmup_if_needed()
 
-        sampling_params = self._build_sampling_params(params)
-        request_id = str(params.get("request_id", uuid.uuid4()))
         runner = self._loop_runner
         if runner is None:
             raise RuntimeError("vLLM client is shut down")
-        return runner.run(
-            self._stream_response(
-                prompt=prompt, request_id=request_id, sampling_params=sampling_params
-            )
-        )
+        prompt_iterator = iter(prompt_iter)
+        output_queue: Queue[Any] = Queue()
+        sentinel = object()
+        max_requests = max(1, int(max_in_flight))
 
-    def stream_chat_completion_batch(
-        self, model: str, prompts: Sequence[str], **params: Any
-    ) -> Sequence[Response]:
-        if self._closed:
-            raise RuntimeError("vLLM client has been closed")
-        self._ensure_engine(model)
-        self._warmup_if_needed()
+        async def _produce() -> None:
+            try:
+                async for item in self._run_async_concurrent(
+                    prompt_iterator, max_requests, params
+                ):
+                    output_queue.put(item)
+            except Exception as exc:
+                output_queue.put(exc)
+            finally:
+                output_queue.put(sentinel)
 
-        prompt_list = list(prompts)
-        if not prompt_list:
-            return []
-
-        sampling_params = self._build_sampling_params(params)
-        runner = self._loop_runner
-        if runner is None:
-            raise RuntimeError("vLLM client is shut down")
-
-        async def _run_batch() -> list[Response]:
-            batch_start = time.perf_counter()
-
-            async def _run_single(index: int, prompt: str) -> tuple[int, Response]:
-                request_id = f"{uuid.uuid4()}-{index}"
-                single_start = time.perf_counter()
-                response = await self._stream_response(
-                    prompt=prompt,
-                    request_id=request_id,
-                    sampling_params=sampling_params,
-                )
-                single_end = time.perf_counter()
-                response.batch_start_offset_ms = (
-                    (single_start - batch_start) * 1000.0
-                )
-                response.batch_end_offset_ms = (single_end - batch_start) * 1000.0
-                return index, response
-
-            results = await asyncio.gather(
-                *(_run_single(idx, prompt) for idx, prompt in enumerate(prompt_list))
-            )
-            results.sort(key=lambda item: item[0])
-            return [response for _, response in results]
-
-        return runner.run(_run_batch())
+        future = runner.submit(_produce())
+        while True:
+            item = output_queue.get()
+            if item is sentinel:
+                future.result()
+                break
+            if isinstance(item, Exception):
+                future.result()
+                raise item
+            yield item
 
     def list_models(self) -> Sequence[str]:
         return [self._model_name] if self._model_name else []
@@ -234,6 +218,43 @@ class VLLMClient(InferenceClient):
 
         self._warmup_done = True
 
+    async def _run_async_concurrent(
+        self,
+        prompt_iter: Iterator[Tuple[int, str]],
+        max_in_flight: int,
+        params: Mapping[str, Any],
+    ):
+        inflight: dict[asyncio.Task[Response], int] = {}
+        exhausted = False
+        while True:
+            while not exhausted and len(inflight) < max_in_flight:
+                try:
+                    index, prompt = next(prompt_iter)
+                except StopIteration:
+                    exhausted = True
+                    break
+                sampling_params = self._build_sampling_params(params)
+                request_id = str(uuid.uuid4())
+                task = asyncio.create_task(
+                    self._stream_response(
+                        prompt=prompt,
+                        request_id=request_id,
+                        sampling_params=sampling_params,
+                    )
+                )
+                inflight[task] = index
+
+            if not inflight:
+                break
+
+            done, _ = await asyncio.wait(
+                inflight.keys(), return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                index = inflight.pop(task)
+                response = task.result()
+                yield index, response
+
     def _build_sampling_params(self, params: Mapping[str, Any]):
         recognized = {
             "temperature",
@@ -284,6 +305,7 @@ class VLLMClient(InferenceClient):
         if self._engine is None:
             raise RuntimeError("vLLM engine is not initialized")
 
+        wall_start = time.time()
         start_time = time.perf_counter()
         prompt_tokens: int | None = None
         completion_tokens = 0
@@ -342,6 +364,7 @@ class VLLMClient(InferenceClient):
         ) as exc:  # pragma: no cover - actual streaming exercised in integration
             raise RuntimeError(f"vLLM offline generation failed: {exc}") from exc
 
+        wall_end = time.time()
         usage = ChatUsage(
             prompt_tokens=prompt_tokens or 0,
             completion_tokens=completion_tokens,
@@ -349,5 +372,9 @@ class VLLMClient(InferenceClient):
         )
         content = "".join(content_parts)
         return Response(
-            content=content, usage=usage, time_to_first_token_ms=ttft_ms or 0.0
+            content=content,
+            usage=usage,
+            time_to_first_token_ms=ttft_ms or 0.0,
+            request_start_time=wall_start,
+            request_end_time=wall_end,
         )

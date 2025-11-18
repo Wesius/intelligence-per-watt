@@ -37,10 +37,12 @@ def test_list_models_live() -> None:
     assert isinstance(models, list)
 
 
-def test_stream_chat_completion_live() -> None:
+def test_run_concurrent_live() -> None:
     client = _require_ollama()
     model = _pick_test_model(client)
-    response = client.stream_chat_completion(model, "Say hello")
+
+    results = list(client.run_concurrent(model, [(0, "Say hello")], max_in_flight=1))
+    _, response = results[0]
 
     assert response.content
     assert response.usage.total_tokens >= 0

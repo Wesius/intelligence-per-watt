@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
-from unittest.mock import patch
+from typing import Any, Iterable, Iterator, Sequence, Tuple
 
 import pytest
 from ipw.clients.base import InferenceClient
@@ -16,14 +15,21 @@ class ConcreteClient(InferenceClient):
     client_id = "test"
     client_name = "Test Client"
 
-    def stream_chat_completion(
-        self, model: str, prompt: str, **params: Any
-    ) -> Response:
-        return Response(
-            content="test response",
-            usage=ChatUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
-            time_to_first_token_ms=100.0,
-        )
+    def run_concurrent(
+        self,
+        model: str,
+        prompt_iter: Iterable[Tuple[int, str]],
+        max_in_flight: int,
+        **params: Any,
+    ) -> Iterator[Tuple[int, Response]]:
+        for index, _prompt in prompt_iter:
+            yield index, Response(
+                content="test response",
+                usage=ChatUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                time_to_first_token_ms=100.0,
+                request_start_time=0.0,
+                request_end_time=1.0,
+            )
 
     def list_models(self) -> Sequence[str]:
         return ["model1", "model2"]
@@ -50,7 +56,7 @@ class TestInferenceClient:
             InferenceClient("http://localhost")
 
     def test_requires_all_abstract_methods(self) -> None:
-        # Missing stream_chat_completion
+        # Missing run_concurrent
         with pytest.raises(TypeError):
 
             class IncompleteClient1(InferenceClient):
@@ -71,8 +77,8 @@ class TestInferenceClient:
         # All methods should work
         assert client.health() is True
         assert client.list_models() == ["model1", "model2"]
-        response = client.stream_chat_completion("model", "prompt")
-        assert response.content == "test response"
+        responses = list(client.run_concurrent("model", [(0, "prompt")], 1))
+        assert responses[0][1].content == "test response"
 
     def test_passes_params_to_implementation(self) -> None:
         class ParamsTestClient(InferenceClient):
@@ -80,17 +86,24 @@ class TestInferenceClient:
             client_name = "Params Test"
             received_params = {}
 
-            def stream_chat_completion(
-                self, model: str, prompt: str, **params: Any
-            ) -> Response:
+            def run_concurrent(
+                self,
+                model: str,
+                prompt_iter: Iterable[Tuple[int, str]],
+                max_in_flight: int,
+                **params: Any,
+            ) -> Iterator[Tuple[int, Response]]:
                 self.received_params = params
-                return Response(
-                    content="test",
-                    usage=ChatUsage(
-                        prompt_tokens=1, completion_tokens=1, total_tokens=2
-                    ),
-                    time_to_first_token_ms=100.0,
-                )
+                for item in prompt_iter:
+                    yield item[0], Response(
+                        content="test",
+                        usage=ChatUsage(
+                            prompt_tokens=1, completion_tokens=1, total_tokens=2
+                        ),
+                        time_to_first_token_ms=100.0,
+                        request_start_time=0.0,
+                        request_end_time=1.0,
+                    )
 
             def list_models(self) -> Sequence[str]:
                 return []
@@ -99,28 +112,15 @@ class TestInferenceClient:
                 return True
 
         client = ParamsTestClient("http://localhost")
-        client.stream_chat_completion("model", "prompt", temperature=0.7, top_p=0.9)
+        list(
+            client.run_concurrent(
+                "model",
+                [(0, "prompt")],
+                max_in_flight=1,
+                temperature=0.7,
+                top_p=0.9,
+            )
+        )
 
         assert client.received_params["temperature"] == 0.7
         assert client.received_params["top_p"] == 0.9
-
-    def test_batch_method_defaults_to_sequential_calls(self) -> None:
-        client = ConcreteClient("http://localhost")
-
-        with patch.object(
-            client, "stream_chat_completion", wraps=client.stream_chat_completion
-        ) as mock_single:
-            responses = client.stream_chat_completion_batch(
-                "model",
-                ["prompt-1", "prompt-2"],
-                temperature=0.3,
-            )
-
-        assert mock_single.call_count == 2
-        assert len(responses) == 2
-        for call in mock_single.call_args_list:
-            assert call.kwargs["temperature"] == 0.3
-        assert responses[0].batch_start_offset_ms is not None
-        assert responses[0].batch_end_offset_ms is not None
-        assert responses[0].batch_start_offset_ms <= responses[0].batch_end_offset_ms
-        assert responses[1].batch_start_offset_ms >= responses[0].batch_end_offset_ms

@@ -55,12 +55,12 @@ def _build_run_metadata() -> Dict[str, Any]:
 @click.option("--dataset", "dataset_id", default="ipw", help="Dataset identifier")
 @click.option("--client-base-url", help="Client base URL")
 @click.option(
-    "--batch-size",
-    "batch_size",
+    "--max-concurrency",
+    "max_concurrency",
     type=click.IntRange(min=1),
     default=1,
     show_default=True,
-    help="Number of prompts to send in each inference batch",
+    help="Maximum number of concurrent inference requests",
 )
 @click.option(
     "--dataset-param",
@@ -81,7 +81,7 @@ def profile(
     client_id: str,
     client_base_url: str | None,
     model: str,
-    batch_size: int,
+    max_concurrency: int,
     dataset_param,
     client_param,
     output_dir: str | None,
@@ -108,7 +108,7 @@ def profile(
         dataset_params=dataset_param,
         client_params=client_param,
         model=model,
-        batch_size=batch_size,
+        max_concurrency=max_concurrency,
         max_queries=max_queries,
         output_dir=Path(output_dir) if output_dir else None,
         run_metadata=_build_run_metadata(),

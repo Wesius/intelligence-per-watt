@@ -15,7 +15,7 @@ class TestProfileCommand:
     @patch("ipw.execution.ProfilerRunner")
     @patch("ipw.datasets.ensure_registered")
     @patch("ipw.clients.ensure_registered")
-    def test_passes_batch_size_to_runner(
+    def test_passes_max_concurrency_to_runner(
         self,
         mock_clients_ensure: Mock,
         mock_datasets_ensure: Mock,
@@ -34,28 +34,38 @@ class TestProfileCommand:
                     "demo",
                     "--model",
                     "llama",
-                    "--batch-size",
+                    "--max-concurrency",
                     "4",
                 ],
             )
 
         assert result.exit_code == 0
         config = mock_runner.call_args[0][0]
-        assert config.batch_size == 4
+        assert config.max_concurrency == 4
 
-    def test_rejects_invalid_batch_size(self) -> None:
+    @patch("ipw.datasets.ensure_registered")
+    @patch("ipw.clients.ensure_registered")
+    def test_rejects_invalid_max_concurrency(
+        self,
+        mock_clients_ensure: Mock,
+        mock_datasets_ensure: Mock,
+    ) -> None:
+        mock_clients_ensure.return_value = None
+        mock_datasets_ensure.return_value = None
+
         runner = CliRunner()
-        result = runner.invoke(
-            profile,
-            [
-                "--client",
-                "demo",
-                "--model",
-                "llama",
-                "--batch-size",
-                "0",
-            ],
-        )
+        with patch.dict("ipw.clients.MISSING_CLIENTS", {}, clear=True):
+            result = runner.invoke(
+                profile,
+                [
+                    "--client",
+                    "demo",
+                    "--model",
+                    "llama",
+                    "--max-concurrency",
+                    "0",
+                ],
+            )
 
         assert result.exit_code != 0
-        assert "Invalid value for '--batch-size'" in result.output
+        assert "Invalid value for '--max-concurrency'" in result.output

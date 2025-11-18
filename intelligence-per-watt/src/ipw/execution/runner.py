@@ -9,7 +9,7 @@ import statistics
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Iterable, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from datasets import Dataset
 from tqdm.auto import tqdm
@@ -70,13 +70,15 @@ class ProfilerRunner:
 
     def __init__(self, config: ProfilerConfig) -> None:
         self._config = config
-        self._records: list[ProfilingRecord] = []
+        self._records: Dict[int, ProfilingRecord] = {}
         self._output_path: Optional[Path] = None
         self._hardware_label: Optional[str] = None
         self._system_info: Optional[SystemInfo] = None
         self._gpu_info: Optional[GpuInfo] = None
         self._baseline_energy: Optional[float] = None
         self._last_energy_total: Optional[float] = None
+        self._all_samples: list[TelemetrySample] = []
+        self._request_timings: Dict[int, Tuple[float, float]] = {}
 
     def run(self) -> None:
         dataset = self._resolve_dataset(
@@ -93,7 +95,7 @@ class ProfilerRunner:
         self._ensure_client_ready(client)
 
         try:
-            with TelemetrySession(collector) as telemetry:
+            with TelemetrySession(collector, buffer_seconds=3600.0) as telemetry:
                 self._process_records(dataset, client, telemetry)
         finally:
             close_client = getattr(client, "close", None)
@@ -114,77 +116,71 @@ class ProfilerRunner:
         client,
         telemetry: TelemetrySession,
     ) -> None:
-        total_queries = self._config.max_queries or dataset.size()
-        iterator = enumerate(dataset)
-        batch_size = max(int(self._config.batch_size or 1), 1)
+        dataset_size = dataset.size()
+        if dataset_size <= 0:
+            return
+
+        target_queries = (
+            self._config.max_queries
+            if self._config.max_queries is not None
+            else dataset_size
+        )
+        total_queries = min(target_queries, dataset_size)
+        if total_queries <= 0:
+            return
+
+        max_concurrency = max(int(self._config.max_concurrency or 1), 1)
+        pending_records: Dict[int, DatasetRecord] = {}
+        prompt_iter = self._prompt_iterator(dataset, total_queries, pending_records)
+        payload: MutableMapping[str, object] = dict(self._config.additional_parameters)
 
         with tqdm(total=total_queries, desc="Profiling", unit="query") as progress:
-            if batch_size == 1:
-                for index, record in iterator:
-                    if index >= total_queries:
-                        break
-                    start = time.time()
-                    response = self._invoke_client(client, record)
-                    end = time.time()
-                    samples = list(telemetry.window(start, end))
-                    built = self._build_record(
-                        index, record, response, samples, start, end
-                    )
-                    if built is not None:
-                        self._records.append(built)
-                        if len(self._records) % self._FLUSH_INTERVAL == 0:
-                            self._persist_records(dataset)
-                    progress.update(1)
-                return
+            for index, response in client.run_concurrent(
+                self._config.model,
+                prompt_iter,
+                max_concurrency,
+                **payload,
+            ):
+                current_readings = telemetry.readings()
+                last_ts = self._all_samples[-1].timestamp if self._all_samples else -1.0
+                for s in current_readings:
+                    if s.timestamp > last_ts:
+                        self._all_samples.append(s)
 
-            batch_records: list[tuple[int, DatasetRecord]] = []
-            for index, record in iterator:
-                if index >= total_queries:
-                    break
-                batch_records.append((index, record))
-                if len(batch_records) == batch_size:
-                    self._process_batch_records(
-                        dataset, client, telemetry, batch_records
-                    )
-                    progress.update(len(batch_records))
-                    batch_records = []
+                record = pending_records.pop(index, None)
+                if record is None:
+                    continue
+                start_time = response.request_start_time
+                end_time = response.request_end_time
+                if end_time < start_time:
+                    end_time = start_time
+                
+                self._request_timings[index] = (start_time, end_time)
 
-            if batch_records:
-                self._process_batch_records(dataset, client, telemetry, batch_records)
-                progress.update(len(batch_records))
+                samples = list(telemetry.window(start_time, end_time))
+                built = self._build_record(
+                    index, record, response, samples, start_time, end_time
+                )
+                if built is not None:
+                    self._records[index] = built
+                    if len(self._records) % self._FLUSH_INTERVAL == 0:
+                        self._recompute_metrics()
+                        self._persist_records(dataset)
+                progress.update(1)
 
-    def _process_batch_records(
+        self._recompute_metrics()
+
+    def _prompt_iterator(
         self,
         dataset,
-        client,
-        telemetry: TelemetrySession,
-        batch_records: Sequence[tuple[int, DatasetRecord]],
-    ) -> None:
-        record_payloads = [record for _, record in batch_records]
-        start = time.time()
-        responses = list(self._invoke_client_batch(client, record_payloads))
-        end = time.time()
-
-        if len(responses) != len(batch_records):
-            raise RuntimeError(
-                f"Client returned {len(responses)} responses for batch of {len(batch_records)}"
-            )
-
-        batch_samples = list(telemetry.window(start, end))
-        time_windows = self._compute_response_time_windows(start, end, responses)
-        sample_windows = self._assign_samples_to_windows(batch_samples, time_windows)
-
-        for idx, ((record_index, record), response, samples) in enumerate(
-            zip(batch_records, responses, sample_windows)
-        ):
-            start_time, end_time = time_windows[idx]
-            built = self._build_record(
-                record_index, record, response, samples, start_time, end_time
-            )
-            if built is not None:
-                self._records.append(built)
-                if len(self._records) % self._FLUSH_INTERVAL == 0:
-                    self._persist_records(dataset)
+        total_queries: int,
+        pending_records: Dict[int, DatasetRecord],
+    ) -> Iterator[Tuple[int, str]]:
+        for index, record in enumerate(dataset):
+            if index >= total_queries:
+                break
+            pending_records[index] = record
+            yield index, record.problem
 
     def _build_record(
         self,
@@ -329,7 +325,8 @@ class ProfilerRunner:
             # the system was idle between queries.
             self._baseline_energy = start_value
 
-        self._last_energy_total = end_value
+        if self._last_energy_total is None or end_value > self._last_energy_total:
+            self._last_energy_total = end_value
 
         return EnergyMetrics(
             per_query_joules=per_query,
@@ -370,111 +367,6 @@ class ProfilerRunner:
         total = self._last_energy_total - self._baseline_energy
         return total if total >= 0 else None
 
-    def _invoke_client(self, client, record: DatasetRecord) -> Response:
-        payload: MutableMapping[str, object] = dict(self._config.additional_parameters)
-        return client.stream_chat_completion(
-            self._config.model, record.problem, **payload
-        )
-
-    def _invoke_client_batch(
-        self, client, records: Sequence[DatasetRecord]
-    ) -> Sequence[Response]:
-        payload: MutableMapping[str, object] = dict(self._config.additional_parameters)
-        prompts = [record.problem for record in records]
-        return client.stream_chat_completion_batch(
-            self._config.model, prompts, **payload
-        )
-
-    def _compute_response_time_windows(
-        self,
-        batch_start_time: float,
-        batch_end_time: float,
-        responses: Sequence[Response],
-    ) -> list[tuple[float, float]]:
-        segments = len(responses)
-        if segments == 0:
-            return []
-
-        duration = max(batch_end_time - batch_start_time, 0.0)
-        if duration <= 0.0:
-            return [(batch_start_time, batch_end_time) for _ in responses]
-
-        fallback_step = duration / segments
-        fallback_windows: list[tuple[float, float]] = []
-        for idx in range(segments):
-            start = batch_start_time + idx * fallback_step
-            end = batch_end_time if idx == segments - 1 else batch_start_time + (
-                (idx + 1) * fallback_step
-            )
-            fallback_windows.append((start, min(end, batch_end_time)))
-
-        windows: list[tuple[float, float]] = []
-        for idx, response in enumerate(responses):
-            start_offset = (
-                response.batch_start_offset_ms / 1000.0
-                if response.batch_start_offset_ms is not None
-                else None
-            )
-            end_offset = (
-                response.batch_end_offset_ms / 1000.0
-                if response.batch_end_offset_ms is not None
-                else None
-            )
-
-            start_time = (
-                batch_start_time + start_offset
-                if start_offset is not None
-                else fallback_windows[idx][0]
-            )
-            start_time = max(batch_start_time, start_time)
-
-            if end_offset is not None:
-                end_time = batch_start_time + end_offset
-            elif (
-                idx + 1 < segments
-                and responses[idx + 1].batch_start_offset_ms is not None
-            ):
-                end_time = batch_start_time + (
-                    responses[idx + 1].batch_start_offset_ms / 1000.0
-                )
-            else:
-                end_time = fallback_windows[idx][1]
-
-            if windows:
-                start_time = max(start_time, windows[-1][1])
-            end_time = max(start_time, min(end_time, batch_end_time))
-
-            windows.append((start_time, end_time))
-
-        return windows
-
-    def _assign_samples_to_windows(
-        self,
-        samples: Sequence[TelemetrySample],
-        windows: Sequence[tuple[float, float]],
-    ) -> list[list[TelemetrySample]]:
-        if not windows:
-            return []
-
-        partitions: list[list[TelemetrySample]] = [[] for _ in windows]
-        window_index = 0
-
-        for sample in samples:
-            timestamp = sample.timestamp
-            while (
-                window_index < len(windows) and timestamp > windows[window_index][1]
-            ):
-                window_index += 1
-
-            if window_index >= len(windows):
-                break
-
-            start, end = windows[window_index]
-            if start <= timestamp <= end:
-                partitions[window_index].append(sample)
-
-        return partitions
-
     def _resolve_dataset(self, dataset_id: str, params: Mapping[str, Any]):
         try:
             dataset_cls = DatasetRegistry.get(dataset_id)
@@ -513,6 +405,88 @@ class ProfilerRunner:
             )
         client.prepare(self._config.model)
 
+    def _recompute_metrics(self) -> None:
+        if not self._all_samples:
+            return
+
+        # Ensure samples are sorted
+        samples = sorted(self._all_samples, key=lambda s: s.timestamp)
+
+        # Map of request_index -> list of (power_watts, energy_delta_joules)
+        request_allocations: Dict[int, list[tuple[float, float]]] = {
+            idx: [] for idx in self._request_timings
+        }
+
+        for i in range(1, len(samples)):
+            s_prev = samples[i - 1]
+            s_curr = samples[i]
+
+            t_start = s_prev.timestamp
+            t_end = s_curr.timestamp
+            t_mid = (t_start + t_end) / 2
+
+            # Energy delta
+            e_prev = s_prev.reading.energy_joules
+            e_curr = s_curr.reading.energy_joules
+            
+            if e_prev is None or e_curr is None:
+                continue
+
+            delta_joules = e_curr - e_prev
+            if delta_joules < 0:
+                delta_joules = 0.0
+
+            # Power
+            power_watts = s_curr.reading.power_watts or 0.0
+
+            # Find active requests
+            active_indices = []
+            for idx, (r_start, r_end) in self._request_timings.items():
+                if r_start <= t_mid <= r_end:
+                    active_indices.append(idx)
+
+            concurrency = len(active_indices)
+            if concurrency > 0:
+                share_energy = delta_joules / concurrency
+                share_power = power_watts / concurrency
+
+                for idx in active_indices:
+                    request_allocations[idx].append((share_power, share_energy))
+
+        # Update records
+        model_name = self._config.model
+        for idx, allocations in request_allocations.items():
+            if idx not in self._records:
+                continue
+
+            record = self._records[idx]
+            if model_name not in record.model_metrics:
+                continue
+
+            if not allocations:
+                continue
+
+            powers = [p for p, _ in allocations]
+            energies = [e for _, e in allocations]
+
+            total_energy = sum(energies)
+            power_stats = _stat_summary(powers)
+            
+            metrics = record.model_metrics[model_name]
+            
+            metrics.energy_metrics = EnergyMetrics(
+                per_query_joules=total_energy,
+                total_joules=total_energy,
+            )
+
+            metrics.power_metrics.gpu.per_query_watts = power_stats
+            metrics.power_metrics.gpu.total_watts = MetricStats(
+                avg=power_stats.avg,
+                max=power_stats.max,
+                median=power_stats.median,
+                min=power_stats.min,
+            )
+
     def _persist_records(self, dataset) -> None:
         if not self._records:
             return
@@ -522,7 +496,8 @@ class ProfilerRunner:
             shutil.rmtree(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        dataset_obj = Dataset.from_list([asdict(record) for record in self._records])
+        ordered = [self._records[idx] for idx in sorted(self._records)]
+        dataset_obj = Dataset.from_list([asdict(record) for record in ordered])
         dataset_obj.save_to_disk(str(output_path))
         output_path.mkdir(parents=True, exist_ok=True)
 
@@ -533,6 +508,7 @@ class ProfilerRunner:
             "hardware_label": self._hardware_label,
             "generated_at": time.time(),
             "total_queries": len(self._records),
+            "session_energy_joules": self._compute_total_energy(),
             "system_info": asdict(self._system_info) if self._system_info else None,
             "gpu_info": asdict(self._gpu_info) if self._gpu_info else None,
             "output_dir": str(output_path),

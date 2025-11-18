@@ -23,6 +23,8 @@ def _build_response(content: str = "response") -> Response:
         content=content,
         usage=ChatUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         time_to_first_token_ms=100.0,
+        request_start_time=0.0,
+        request_end_time=1.0,
     )
 
 
@@ -132,11 +134,12 @@ class TestProfilerRunner:
 
         mock_client = Mock()
         mock_client.health.return_value = True
-        mock_client.stream_chat_completion.return_value = Response(
-            content="response",
-            usage=ChatUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
-            time_to_first_token_ms=100.0,
-        )
+
+        def _run_concurrent(model, prompt_iter, max_in_flight, **_):
+            for index, _prompt in prompt_iter:
+                yield index, _build_response()
+
+        mock_client.run_concurrent.side_effect = _run_concurrent
         mock_client_registry.get.return_value = Mock(return_value=mock_client)
 
         mock_collector_instance = Mock()
@@ -144,6 +147,7 @@ class TestProfilerRunner:
 
         mock_telemetry = Mock()
         mock_telemetry.window.return_value = []
+        mock_telemetry.readings.return_value = []
         mock_session.return_value.__enter__.return_value = mock_telemetry
 
         # Mock Dataset.from_list to return a mock with save_to_disk that creates the directory
@@ -173,69 +177,95 @@ class TestProfilerRunner:
         summary = json.loads(summary_path.read_text())
         assert summary["profiler_config"]["model"] == "test-model"
         assert summary["profiler_config"]["run_metadata"] == {}
+        assert "session_energy_joules" in summary
 
-    def test_compute_response_time_windows_prefers_offsets(self) -> None:
+    def test_compute_total_energy_calculates_delta(self) -> None:
         config = ProfilerConfig(
-            model="test-model",
-            client_id="client",
-            dataset_id="dataset",
+            model="test",
+            client_id="test",
+            dataset_id="test",
         )
         runner = ProfilerRunner(config)
-        responses = [_build_response("a"), _build_response("b")]
-        responses[0].batch_start_offset_ms = 0.0
-        responses[0].batch_end_offset_ms = 120.0
-        responses[1].batch_start_offset_ms = 200.0
-        responses[1].batch_end_offset_ms = 600.0
 
-        windows = runner._compute_response_time_windows(10.0, 11.0, responses)
+        # Establish baseline
+        runner._compute_energy_metrics([TelemetryReading(energy_joules=100.0)])
+        # Update last total
+        runner._compute_energy_metrics([TelemetryReading(energy_joules=250.0)])
 
-        assert len(windows) == 2
-        assert windows[0][0] == pytest.approx(10.0)
-        assert windows[0][1] == pytest.approx(10.12)
-        assert windows[1][0] == pytest.approx(10.2)
-        assert windows[1][1] == pytest.approx(10.6)
+        assert runner._compute_total_energy() == 150.0
 
-    def test_compute_response_time_windows_falls_back_to_even_split(self) -> None:
+    def test_recompute_metrics_shares_energy(self) -> None:
         config = ProfilerConfig(
             model="test-model",
-            client_id="client",
-            dataset_id="dataset",
+            client_id="test",
+            dataset_id="test",
         )
         runner = ProfilerRunner(config)
-        responses = [_build_response("a"), _build_response("b"), _build_response("c")]
-
-        windows = runner._compute_response_time_windows(0.0, 3.0, responses)
-
-        assert windows == [
-            (0.0, 1.0),
-            (1.0, 2.0),
-            (2.0, 3.0),
+        
+        # Setup records
+        record = DatasetRecord(problem="test", answer="", subject="math")
+        metrics = runner._build_record(
+            0, record, _build_response(), [], 0, 1
+        ).model_metrics["test-model"]
+        
+        runner._records = {
+            0: runner._build_record(0, record, _build_response(), [], 0, 2),
+            1: runner._build_record(1, record, _build_response(), [], 1, 3),
+        }
+        
+        # Request 0: [0, 2]
+        # Request 1: [1, 3]
+        # Overlap: [1, 2]
+        
+        runner._request_timings = {
+            0: (0.0, 2.0),
+            1: (1.0, 3.0),
+        }
+        
+        # Samples:
+        # t=0.0, E=0
+        # t=1.0, E=100 (Delta 100, Active: {0}) -> Req 0 gets 100
+        # t=2.0, E=200 (Delta 100, Active: {0, 1}) -> Req 0 gets 50, Req 1 gets 50
+        # t=3.0, E=300 (Delta 100, Active: {1}) -> Req 1 gets 100
+        
+        # Total Req 0: 150
+        # Total Req 1: 150
+        
+        runner._all_samples = [
+            TelemetrySample(timestamp=0.0, reading=TelemetryReading(energy_joules=0.0, power_watts=100.0)),
+            TelemetrySample(timestamp=1.0, reading=TelemetryReading(energy_joules=100.0, power_watts=100.0)),
+            TelemetrySample(timestamp=2.0, reading=TelemetryReading(energy_joules=200.0, power_watts=100.0)),
+            TelemetrySample(timestamp=3.0, reading=TelemetryReading(energy_joules=300.0, power_watts=100.0)),
         ]
-
-    def test_assign_samples_to_windows_uses_boundaries(self) -> None:
-        config = ProfilerConfig(
-            model="test-model",
-            client_id="client",
-            dataset_id="dataset",
-        )
-        runner = ProfilerRunner(config)
-        samples = [
-            TelemetrySample(timestamp=0.1, reading=TelemetryReading()),
-            TelemetrySample(timestamp=0.3, reading=TelemetryReading()),
-            TelemetrySample(timestamp=0.35, reading=TelemetryReading()),
-            TelemetrySample(timestamp=0.8, reading=TelemetryReading()),
-        ]
-        windows = [(0.0, 0.25), (0.25, 0.6), (0.6, 1.0)]
-
-        partitions = runner._assign_samples_to_windows(samples, windows)
-
-        assert len(partitions) == 3
-        assert len(partitions[0]) == 1
-        assert len(partitions[1]) == 2
-        assert len(partitions[2]) == 1
+        
+        runner._recompute_metrics()
+        
+        m0 = runner._records[0].model_metrics["test-model"].energy_metrics
+        m1 = runner._records[1].model_metrics["test-model"].energy_metrics
+        
+        assert m0.per_query_joules == 150.0
+        assert m1.per_query_joules == 150.0
+        
+        # Check power sharing
+        # t=1.0 interval (0-1): Power 100, Concurrency 1 -> 100W
+        # t=2.0 interval (1-2): Power 100, Concurrency 2 -> 50W
+        # t=3.0 interval (2-3): Power 100, Concurrency 1 -> 100W
+        
+        p0 = runner._records[0].model_metrics["test-model"].power_metrics.gpu.per_query_watts
+        p1 = runner._records[1].model_metrics["test-model"].power_metrics.gpu.per_query_watts
+        
+        # Req 0 sees [100, 50]
+        assert p0.max == 100.0
+        assert p0.min == 50.0
+        assert p0.avg == 75.0
+        
+        # Req 1 sees [50, 100]
+        assert p1.max == 100.0
+        assert p1.min == 50.0
+        assert p1.avg == 75.0
 
     @patch("ipw.execution.runner.tqdm")
-    def test_process_records_batches_requests_when_configured(
+    def test_process_records_respects_max_concurrency(
         self,
         mock_tqdm: Mock,
     ) -> None:
@@ -257,21 +287,18 @@ class TestProfilerRunner:
 
         telemetry = Mock()
         telemetry.window.side_effect = lambda *_: []
+        telemetry.readings.return_value = []
 
         client = Mock()
-        client.stream_chat_completion = Mock()
-        client.stream_chat_completion_batch.side_effect = [
-            [_build_response("a"), _build_response("b")],
-            [_build_response("c")],
-        ]
 
         config = ProfilerConfig(
             model="test-model",
             client_id="test-client",
             dataset_id="test-dataset",
-            batch_size=2,
+            max_concurrency=2,
         )
         runner = ProfilerRunner(config)
+        call_count = 0
 
         progress = Mock()
         mock_cm = MagicMock()
@@ -279,16 +306,65 @@ class TestProfilerRunner:
         mock_cm.__exit__.return_value = None
         mock_tqdm.return_value = mock_cm
 
+        def fake_run(model, prompt_iter, max_in_flight, **_):
+            assert max_in_flight == 2
+            for index, prompt in prompt_iter:
+                nonlocal call_count
+                call_count += 1
+                yield index, _build_response(prompt)
+
+        client.run_concurrent.side_effect = fake_run
+
         runner._process_records(dataset, client, telemetry)
 
-        assert client.stream_chat_completion.call_count == 0
-        assert client.stream_chat_completion_batch.call_count == 2
-        assert [record.problem for record in runner._records] == [
-            "prompt-0",
-            "prompt-1",
-            "prompt-2",
-        ]
+        assert call_count == 3
         assert len(runner._records) == 3
+
+    def test_process_records_orders_out_of_order_responses(self) -> None:
+        records = [
+            DatasetRecord(problem=f"prompt-{idx}", answer="", subject="math")
+            for idx in range(3)
+        ]
+
+        class DummyDataset:
+            def __init__(self, entries):
+                self._entries = entries
+
+            def size(self) -> int:
+                return len(self._entries)
+
+            def __iter__(self):
+                return iter(self._entries)
+
+        dataset = DummyDataset(records)
+        telemetry = Mock()
+        telemetry.window.side_effect = lambda *_: []
+        telemetry.readings.return_value = []
+
+        class OutOfOrderClient:
+            def run_concurrent(self, model, prompt_iter, max_in_flight, **_):
+                buffered = list(prompt_iter)
+                yield buffered[2][0], _build_response("third")
+                yield buffered[0][0], _build_response("first")
+                yield buffered[1][0], _build_response("second")
+
+            def health(self):
+                return True
+
+        client = OutOfOrderClient()
+        config = ProfilerConfig(
+            model="test-model",
+            client_id="test-client",
+            dataset_id="test-dataset",
+            max_concurrency=2,
+        )
+        runner = ProfilerRunner(config)
+        runner._process_records(dataset, client, telemetry)
+
+        assert sorted(runner._records.keys()) == [0, 1, 2]
+        assert runner._records[0].model_answers["test-model"] == "first"
+        assert runner._records[1].model_answers["test-model"] == "second"
+        assert runner._records[2].model_answers["test-model"] == "third"
 
     @patch("ipw.execution.runner.DatasetRegistry")
     @patch("ipw.execution.runner.ClientRegistry")
@@ -527,6 +603,8 @@ class TestProfilerRunner:
             content="response",
             usage=ChatUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
             time_to_first_token_ms=100.0,
+            request_start_time=0.0,
+            request_end_time=2.0,
         )
         samples = [
             TelemetrySample(
@@ -567,6 +645,8 @@ class TestProfilerRunner:
             content="",
             usage=ChatUsage(prompt_tokens=10, completion_tokens=0, total_tokens=10),
             time_to_first_token_ms=0.0,
+            request_start_time=0.0,
+            request_end_time=1.0,
         )
         samples = []
 
@@ -590,6 +670,8 @@ class TestProfilerRunner:
             content="response",
             usage=ChatUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
             time_to_first_token_ms=100.0,
+            request_start_time=0.0,
+            request_end_time=1.0,
         )
         samples = []
 

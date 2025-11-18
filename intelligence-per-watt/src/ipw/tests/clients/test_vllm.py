@@ -48,13 +48,14 @@ def test_list_models_live(vllm_client):
     assert MODEL in models
 
 
-def test_stream_chat_completion_live(vllm_client):
+def test_run_concurrent_live(vllm_client):
     prompt = os.environ.get(
         "VLLM_TEST_PROMPT",
         "Say hello from the Intelligence Per Watt vLLM integration test.",
     )
 
-    response = vllm_client.stream_chat_completion(MODEL, prompt)
+    results = list(vllm_client.run_concurrent(MODEL, [(0, prompt)], max_in_flight=1))
+    _, response = results[0]
 
     assert response.content.strip()
     assert response.usage.total_tokens > 0
