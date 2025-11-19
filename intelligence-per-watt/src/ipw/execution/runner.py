@@ -351,9 +351,10 @@ class ProfilerRunner:
 
         hardware_label = self._hardware_label or "UNKNOWN_HW"
         model_slug = _slugify_model(self._config.model)
+        concurrency_label = f"bs{self._config.max_concurrency}" if self._config.max_concurrency else "_bs1"
         default_runs_dir = Path(__file__).resolve().parents[4] / "runs"
         base_dir = self._config.output_dir or default_runs_dir
-        profile_dir = f"profile_{hardware_label}_{model_slug}".strip("_")
+        profile_dir = f"profile_{hardware_label}_{model_slug}_{concurrency_label}".strip("_")
 
         output_path = Path(base_dir) / profile_dir
 
