@@ -176,23 +176,7 @@ class TestProfilerRunner:
 
         summary = json.loads(summary_path.read_text())
         assert summary["profiler_config"]["model"] == "test-model"
-        assert summary["profiler_config"]["run_metadata"] == {}
-        assert "session_energy_joules" in summary
-
-    def test_compute_total_energy_calculates_delta(self) -> None:
-        config = ProfilerConfig(
-            model="test",
-            client_id="test",
-            dataset_id="test",
-        )
-        runner = ProfilerRunner(config)
-
-        # Establish baseline
-        runner._compute_energy_metrics([TelemetryReading(energy_joules=100.0)])
-        # Update last total
-        runner._compute_energy_metrics([TelemetryReading(energy_joules=250.0)])
-
-        assert runner._compute_total_energy() == 150.0
+        assert "versions" in summary
 
     def test_recompute_metrics_shares_energy(self) -> None:
         config = ProfilerConfig(

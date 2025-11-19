@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from importlib import metadata as importlib_metadata
 import json
 import math
+import platform
 import shutil
 import statistics
 import time
@@ -362,12 +364,6 @@ class ProfilerRunner:
         self._output_path = output_path
         return output_path
 
-    def _compute_total_energy(self) -> Optional[float]:
-        if self._baseline_energy is None or self._last_energy_total is None:
-            return None
-        total = self._last_energy_total - self._baseline_energy
-        return total if total >= 0 else None
-
     def _resolve_dataset(self, dataset_id: str, params: Mapping[str, Any]):
         try:
             dataset_cls = DatasetRegistry.get(dataset_id)
@@ -503,17 +499,15 @@ class ProfilerRunner:
         output_path.mkdir(parents=True, exist_ok=True)
 
         summary = {
-            "model": self._config.model,
-            "dataset": getattr(dataset, "dataset_id", self._config.dataset_id),
             "dataset_name": getattr(dataset, "dataset_name", None),
             "hardware_label": self._hardware_label,
             "generated_at": time.time(),
             "total_queries": len(self._records),
-            "session_energy_joules": self._compute_total_energy(),
             "system_info": asdict(self._system_info) if self._system_info else None,
             "gpu_info": asdict(self._gpu_info) if self._gpu_info else None,
             "output_dir": str(output_path),
             "profiler_config": _jsonify(asdict(self._config)),
+            "versions": _get_versions(),
         }
         summary_path = output_path / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2))
@@ -533,6 +527,18 @@ def _stat_summary(values: Iterable[Optional[float]]) -> MetricStats:
 
 def _slugify_model(model: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in model).strip("_") or "model"
+
+
+def _get_versions() -> Dict[str, str]:
+    try:
+        ipw_version = importlib_metadata.version("ipw")
+    except importlib_metadata.PackageNotFoundError:
+        ipw_version = "unknown"
+
+    return {
+        "ipw": ipw_version,
+        "python": platform.python_version(),
+    }
 
 
 def _jsonify(value: Any) -> Any:
