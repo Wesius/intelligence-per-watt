@@ -63,7 +63,7 @@ class ProfilerRunner:
     # 4. Accumulate all records in-memory and write a HuggingFace dataset to the
     #    configured output directory once the run completes, along with a
     #    `summary.json` containing run metadata and aggregate energy totals.
-    #
+    #``
     # The actual measurements and conversions stay localized to helper methods
     # (`_compute_energy_metrics`, `_stat_summary`, etc.) so that the control flow
     # remains readable. Any future refactor (e.g., streaming writes or different
@@ -77,8 +77,6 @@ class ProfilerRunner:
         self._hardware_label: Optional[str] = None
         self._system_info: Optional[SystemInfo] = None
         self._gpu_info: Optional[GpuInfo] = None
-        self._baseline_energy: Optional[float] = None
-        self._last_energy_total: Optional[float] = None
         self._all_samples: list[TelemetrySample] = []
         self._request_timings: Dict[int, Tuple[float, float]] = {}
 
@@ -91,6 +89,8 @@ class ProfilerRunner:
             self._config.client_base_url,
             self._config.client_params,
         )
+
+        self._load_existing_state() # Load previous run data if any
 
         collector = EnergyMonitorCollector()
 
@@ -181,6 +181,8 @@ class ProfilerRunner:
         for index, record in enumerate(dataset):
             if index >= total_queries:
                 break
+            if index in self._records: # Skip already processed queries
+                continue
             pending_records[index] = record
             yield index, record.problem
 
@@ -196,10 +198,11 @@ class ProfilerRunner:
         self._update_hardware_metadata(samples)
         telemetry_readings = [sample.reading for sample in samples]
 
-        energy_metrics = self._compute_energy_metrics(telemetry_readings)
-        power_stats = _stat_summary(
-            [reading.power_watts for reading in telemetry_readings]
-        )
+        # Initial empty metrics, populated by _recompute_metrics later
+        energy_metrics = EnergyMetrics()
+        power_metrics = PowerMetrics()
+
+        # System state metrics (valid per-window without attribution logic)
         temperature_stats = _stat_summary(
             [reading.temperature_celsius for reading in telemetry_readings]
         )
@@ -246,17 +249,7 @@ class ProfilerRunner:
                 cpu_mb=cpu_memory_stats,
                 gpu_mb=gpu_memory_stats,
             ),
-            power_metrics=PowerMetrics(
-                gpu=PowerComponentMetrics(
-                    per_query_watts=power_stats,
-                    total_watts=MetricStats(
-                        avg=power_stats.avg,
-                        max=power_stats.max,
-                        median=power_stats.median,
-                        min=power_stats.min,
-                    ),
-                )
-            ),
+            power_metrics=power_metrics,
             temperature_metrics=temperature_stats,
             token_metrics=TokenMetrics(
                 input=prompt_tokens,
@@ -270,8 +263,11 @@ class ProfilerRunner:
         )
 
         record_payload = ProfilingRecord(
+            dataset_index=index,
             problem=record.problem,
             answer=record.answer,
+            request_start_time=start_time,
+            request_end_time=end_time,
             dataset_metadata=dict(record.dataset_metadata),
             subject=record.subject,
             model_answers={model_name: response.content},
@@ -279,61 +275,6 @@ class ProfilerRunner:
         )
 
         return record_payload
-
-    def _compute_energy_metrics(
-        self, readings: Sequence[TelemetryReading]
-    ) -> EnergyMetrics:
-        """Compute energy metrics from telemetry readings.
-
-        Energy values should be monotonically increasing cumulative counters.
-        Negative deltas indicate counter reset or data anomaly and are treated as None.
-        """
-        energy_values = [
-            reading.energy_joules
-            for reading in readings
-            if reading.energy_joules is not None
-        ]
-        if not energy_values:
-            return EnergyMetrics()
-
-        start_value = energy_values[0]
-        end_value = energy_values[-1]
-
-        # Validate energy values are finite and non-negative
-        if not (
-            math.isfinite(start_value)
-            and math.isfinite(end_value)
-            and start_value >= 0
-            and end_value >= 0
-        ):
-            return EnergyMetrics()
-
-        per_query_delta = end_value - start_value
-        per_query = per_query_delta if per_query_delta >= 0 else None
-
-        reset_in_window = per_query_delta < 0
-        reset_between_queries = (
-            not reset_in_window
-            and self._last_energy_total is not None
-            and end_value < self._last_energy_total
-        )
-
-        if reset_in_window:
-            # Counter rolled backwards while we were sampling – drop this reading
-            # and anchor future totals to the post-reset value.
-            self._baseline_energy = end_value
-        elif self._baseline_energy is None or reset_between_queries:
-            # Either the first reading we've seen or a reset that occurred while
-            # the system was idle between queries.
-            self._baseline_energy = start_value
-
-        if self._last_energy_total is None or end_value > self._last_energy_total:
-            self._last_energy_total = end_value
-
-        return EnergyMetrics(
-            per_query_joules=per_query,
-            total_joules=per_query,
-        )
 
     def _update_hardware_metadata(self, readings: Sequence[TelemetrySample]) -> None:
         for sample in readings:
@@ -364,11 +305,28 @@ class ProfilerRunner:
         self._output_path = output_path
         return output_path
 
+    def _load_existing_state(self) -> None:
+        output_path = self._get_output_path()
+        if not output_path.exists():
+            return
+
+        try:
+            existing_dataset = Dataset.load_from_disk(str(output_path))
+            for record_dict in existing_dataset:
+                record = ProfilingRecord(**record_dict)
+                self._records[record.dataset_index] = record
+                self._request_timings[record.dataset_index] = (
+                    record.request_start_time,
+                    record.request_end_time,
+                )
+        except Exception:
+            raise
+
     def _resolve_dataset(self, dataset_id: str, params: Mapping[str, Any]):
         try:
             dataset_cls = DatasetRegistry.get(dataset_id)
         except KeyError as exc:
-            raise RuntimeError(f"Unknown dataset '{dataset_id}'") from exc
+                raise RuntimeError(f"Unknown dataset '{dataset_id}'") from exc
 
         try:
             return dataset_cls(**params)
@@ -409,8 +367,8 @@ class ProfilerRunner:
         # Ensure samples are sorted
         samples = sorted(self._all_samples, key=lambda s: s.timestamp)
 
-        # Map of request_index -> list of (power_watts, energy_delta_joules)
-        request_allocations: Dict[int, list[tuple[float, float]]] = {
+        # Map of request_index -> list of (share_power, share_energy, raw_power, raw_energy)
+        request_allocations: Dict[int, list[tuple[float, float, float, float]]] = {
             idx: [] for idx in self._request_timings
         }
 
@@ -448,7 +406,8 @@ class ProfilerRunner:
                 share_power = power_watts / concurrency
 
                 for idx in active_indices:
-                    request_allocations[idx].append((share_power, share_energy))
+                    # Store shared AND raw values
+                    request_allocations[idx].append((share_power, share_energy, power_watts, delta_joules))
 
         # Update records
         model_name = self._config.model
@@ -463,25 +422,31 @@ class ProfilerRunner:
             if not allocations:
                 continue
 
-            powers = [p for p, _ in allocations]
-            energies = [e for _, e in allocations]
+            # Unpack the 4-tuple
+            shared_powers = [x[0] for x in allocations]
+            shared_energies = [x[1] for x in allocations]
+            raw_powers = [x[2] for x in allocations]
+            raw_energies = [x[3] for x in allocations]
 
-            total_energy = sum(energies)
-            power_stats = _stat_summary(powers)
+            total_shared_energy = sum(shared_energies)
+            total_raw_energy = sum(raw_energies)
+            
+            shared_power_stats = _stat_summary(shared_powers)
+            raw_power_stats = _stat_summary(raw_powers)
             
             metrics = record.model_metrics[model_name]
             
             metrics.energy_metrics = EnergyMetrics(
-                per_query_joules=total_energy,
-                total_joules=total_energy,
+                per_query_joules=total_shared_energy,
+                total_joules=total_raw_energy,
             )
 
-            metrics.power_metrics.gpu.per_query_watts = power_stats
+            metrics.power_metrics.gpu.per_query_watts = shared_power_stats
             metrics.power_metrics.gpu.total_watts = MetricStats(
-                avg=power_stats.avg,
-                max=power_stats.max,
-                median=power_stats.median,
-                min=power_stats.min,
+                avg=raw_power_stats.avg,
+                max=raw_power_stats.max,
+                median=raw_power_stats.median,
+                min=raw_power_stats.min,
             )
 
     def _persist_records(self, dataset) -> None:

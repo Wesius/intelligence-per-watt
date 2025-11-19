@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
+from dataclasses import asdict
 
 import pytest
 from ipw.core.types import (
@@ -16,6 +17,7 @@ from ipw.core.types import (
 )
 from ipw.execution.runner import ProfilerRunner, _slugify_model, _stat_summary
 from ipw.execution.telemetry_session import TelemetrySample
+from ipw.execution.types import ModelMetrics, ProfilingRecord
 
 
 def _build_response(content: str = "response") -> Response:
@@ -188,18 +190,23 @@ class TestProfilerRunner:
         
         # Setup records
         record = DatasetRecord(problem="test", answer="", subject="math")
-        metrics = runner._build_record(
-            0, record, _build_response(), [], 0, 1
-        ).model_metrics["test-model"]
+        # _build_record now requires index, start_time, end_time
+        # Initial call to get dummy metrics (not used, just to create structure)
+        dummy_record_0 = runner._build_record(
+            0, record, _build_response("response-0"), [], 0.0, 1.0
+        )
+        dummy_record_1 = runner._build_record(
+            1, record, _build_response("response-1"), [], 0.0, 1.0
+        )
         
         runner._records = {
-            0: runner._build_record(0, record, _build_response(), [], 0, 2),
-            1: runner._build_record(1, record, _build_response(), [], 1, 3),
+            0: dummy_record_0,
+            1: dummy_record_1,
         }
         
+        # Manually set timings for specific test scenario
         # Request 0: [0, 2]
         # Request 1: [1, 3]
-        # Overlap: [1, 2]
         
         runner._request_timings = {
             0: (0.0, 2.0),
@@ -227,26 +234,38 @@ class TestProfilerRunner:
         m0 = runner._records[0].model_metrics["test-model"].energy_metrics
         m1 = runner._records[1].model_metrics["test-model"].energy_metrics
         
+        # Shared/Per-Query (Amortized)
         assert m0.per_query_joules == 150.0
         assert m1.per_query_joules == 150.0
+
+        # Raw/Total (System Load during window)
+        # Req 0 active during [0, 1] (100J) and [1, 2] (100J) -> Total 200J
+        # Req 1 active during [1, 2] (100J) and [2, 3] (100J) -> Total 200J
+        assert m0.total_joules == 200.0
+        assert m1.total_joules == 200.0
         
         # Check power sharing
-        # t=1.0 interval (0-1): Power 100, Concurrency 1 -> 100W
-        # t=2.0 interval (1-2): Power 100, Concurrency 2 -> 50W
-        # t=3.0 interval (2-3): Power 100, Concurrency 1 -> 100W
+        # t=1.0 interval (0-1): Power 100, Concurrency 1 -> Shared 100W, Raw 100W
+        # t=2.0 interval (1-2): Power 100, Concurrency 2 -> Shared 50W, Raw 100W
+        # t=3.0 interval (2-3): Power 100, Concurrency 1 -> Shared 100W, Raw 100W
         
         p0 = runner._records[0].model_metrics["test-model"].power_metrics.gpu.per_query_watts
-        p1 = runner._records[1].model_metrics["test-model"].power_metrics.gpu.per_query_watts
+        p0_total = runner._records[0].model_metrics["test-model"].power_metrics.gpu.total_watts
         
-        # Req 0 sees [100, 50]
+        p1 = runner._records[1].model_metrics["test-model"].power_metrics.gpu.per_query_watts
+        p1_total = runner._records[1].model_metrics["test-model"].power_metrics.gpu.total_watts
+        
+        # Req 0 sees Shared=[100, 50], Raw=[100, 100]
         assert p0.max == 100.0
         assert p0.min == 50.0
         assert p0.avg == 75.0
+        assert p0_total.avg == 100.0
         
-        # Req 1 sees [50, 100]
+        # Req 1 sees Shared=[50, 100], Raw=[100, 100]
         assert p1.max == 100.0
         assert p1.min == 50.0
         assert p1.avg == 75.0
+        assert p1_total.avg == 100.0
 
     @patch("ipw.execution.runner.tqdm")
     def test_process_records_respects_max_concurrency(
@@ -418,162 +437,6 @@ class TestProfilerRunner:
         with pytest.raises(RuntimeError, match="unavailable"):
             runner.run()
 
-    def test_compute_energy_metrics_handles_empty_readings(self) -> None:
-        config = ProfilerConfig(
-            model="test",
-            client_id="test",
-            dataset_id="test",
-        )
-        runner = ProfilerRunner(config)
-
-        metrics = runner._compute_energy_metrics([])
-        assert metrics.per_query_joules is None
-        assert metrics.total_joules is None
-
-    def test_compute_energy_metrics_handles_first_query(self) -> None:
-        config = ProfilerConfig(
-            model="test",
-            client_id="test",
-            dataset_id="test",
-        )
-        runner = ProfilerRunner(config)
-
-        readings = [
-            TelemetryReading(energy_joules=100.0),
-            TelemetryReading(energy_joules=150.0),
-        ]
-        metrics = runner._compute_energy_metrics(readings)
-
-        assert metrics.per_query_joules == 50.0
-        assert metrics.total_joules == 50.0
-
-    def test_compute_energy_metrics_handles_subsequent_queries(self) -> None:
-        config = ProfilerConfig(
-            model="test",
-            client_id="test",
-            dataset_id="test",
-        )
-        runner = ProfilerRunner(config)
-
-        # First query
-        readings1 = [
-            TelemetryReading(energy_joules=100.0),
-            TelemetryReading(energy_joules=150.0),
-        ]
-        runner._compute_energy_metrics(readings1)
-
-        # Second query
-        readings2 = [
-            TelemetryReading(energy_joules=150.0),
-            TelemetryReading(energy_joules=200.0),
-        ]
-        metrics = runner._compute_energy_metrics(readings2)
-
-        assert metrics.per_query_joules == 50.0
-
-    def test_compute_energy_metrics_handles_counter_reset_between_queries(self) -> None:
-        config = ProfilerConfig(
-            model="test",
-            client_id="test",
-            dataset_id="test",
-        )
-        runner = ProfilerRunner(config)
-
-        # First query
-        readings1 = [
-            TelemetryReading(energy_joules=100.0),
-            TelemetryReading(energy_joules=150.0),
-        ]
-        runner._compute_energy_metrics(readings1)
-
-        # Counter reset (goes backward)
-        readings2 = [
-            TelemetryReading(energy_joules=50.0),
-            TelemetryReading(energy_joules=100.0),
-        ]
-        metrics = runner._compute_energy_metrics(readings2)
-
-        # Should measure per-query window delta despite reset while idle
-        assert metrics.per_query_joules == 50.0
-
-    def test_compute_energy_metrics_ignores_idle_energy_between_queries(self) -> None:
-        config = ProfilerConfig(
-            model="test",
-            client_id="test",
-            dataset_id="test",
-        )
-        runner = ProfilerRunner(config)
-
-        # First query establishes baseline
-        readings1 = [
-            TelemetryReading(energy_joules=100.0),
-            TelemetryReading(energy_joules=150.0),
-        ]
-        runner._compute_energy_metrics(readings1)
-
-        # Second query starts after unrelated energy consumption
-        readings2 = [
-            TelemetryReading(energy_joules=250.0),
-            TelemetryReading(energy_joules=260.0),
-        ]
-        metrics = runner._compute_energy_metrics(readings2)
-
-        assert metrics.per_query_joules == 10.0
-
-    def test_compute_energy_metrics_handles_counter_reset_within_query(self) -> None:
-        config = ProfilerConfig(
-            model="test",
-            client_id="test",
-            dataset_id="test",
-        )
-        runner = ProfilerRunner(config)
-
-        # First query establishes baseline
-        readings1 = [
-            TelemetryReading(energy_joules=100.0),
-            TelemetryReading(energy_joules=150.0),
-        ]
-        runner._compute_energy_metrics(readings1)
-
-        # Counter resets while the query is running
-        readings2 = [
-            TelemetryReading(energy_joules=200.0),
-            TelemetryReading(energy_joules=10.0),
-        ]
-        metrics = runner._compute_energy_metrics(readings2)
-
-        assert metrics.per_query_joules is None
-
-    def test_compute_energy_metrics_filters_infinite(self) -> None:
-        config = ProfilerConfig(
-            model="test",
-            client_id="test",
-            dataset_id="test",
-        )
-        runner = ProfilerRunner(config)
-
-        readings = [
-            TelemetryReading(energy_joules=float("inf")),
-        ]
-        metrics = runner._compute_energy_metrics(readings)
-
-        assert metrics.per_query_joules is None
-
-    def test_compute_energy_metrics_filters_negative(self) -> None:
-        config = ProfilerConfig(
-            model="test",
-            client_id="test",
-            dataset_id="test",
-        )
-        runner = ProfilerRunner(config)
-
-        readings = [
-            TelemetryReading(energy_joules=-100.0),
-        ]
-        metrics = runner._compute_energy_metrics(readings)
-
-        assert metrics.per_query_joules is None
-
     def test_build_record_creates_model_metrics(self) -> None:
         config = ProfilerConfig(
             model="test-model",
@@ -610,6 +473,9 @@ class TestProfilerRunner:
         result = runner._build_record(0, record, response, samples, 0.0, 2.0)
 
         assert result is not None
+        assert result.dataset_index == 0
+        assert result.request_start_time == 0.0
+        assert result.request_end_time == 2.0
         assert "test-model" in result.model_metrics
         metrics = result.model_metrics["test-model"]
         assert metrics.token_metrics.input == 10
@@ -637,6 +503,9 @@ class TestProfilerRunner:
         result = runner._build_record(0, record, response, samples, 0.0, 1.0)
 
         assert result is not None
+        assert result.dataset_index == 0
+        assert result.request_start_time == 0.0
+        assert result.request_end_time == 1.0
         metrics = result.model_metrics["test-model"]
         assert metrics.latency_metrics.per_token_ms is None
         assert metrics.latency_metrics.throughput_tokens_per_sec is None
@@ -663,6 +532,9 @@ class TestProfilerRunner:
         result = runner._build_record(0, record, response, samples, 0.0, 1.0)
 
         assert result is not None
+        assert result.dataset_index == 0
+        assert result.request_start_time == 0.0
+        assert result.request_end_time == 1.0
         metrics = result.model_metrics["test-model"]
         assert metrics.latency_metrics.throughput_tokens_per_sec == 10.0
         assert metrics.latency_metrics.per_token_ms == 100.0
@@ -681,3 +553,95 @@ class TestProfilerRunner:
         assert "RTX3090" in str(path)
         assert "llama_3_2_1b" in str(path)
         assert "_bs1" in str(path)
+
+    @patch("ipw.execution.runner.DatasetRegistry")
+    @patch("ipw.execution.runner.ClientRegistry")
+    @patch("ipw.execution.runner.EnergyMonitorCollector")
+    @patch("ipw.execution.runner.TelemetrySession")
+    @patch("ipw.execution.runner.Dataset")
+    def test_resumable_run_skips_processed_queries(
+        self,
+        mock_dataset_class: Mock,
+        mock_session: Mock,
+        mock_collector: Mock,
+        mock_client_registry: Mock,
+        mock_dataset_registry: Mock,
+        tmp_path: Path,
+    ) -> None:
+        # Setup mocks for the first (interrupted) run
+        mock_dataset_full = MagicMock()
+        mock_dataset_full.size.return_value = 5 # Total 5 queries
+        mock_dataset_full.__iter__.return_value = iter(
+            [DatasetRecord(problem=f"p{i}", answer=f"a{i}", subject="m") for i in range(5)]
+        )
+        mock_dataset_full.dataset_name = "Mock Dataset" # Ensure dataset_name is a string
+        mock_dataset_registry.get.return_value = Mock(return_value=mock_dataset_full)
+
+        mock_client = Mock()
+        mock_client.health.return_value = True
+
+        # Simulate client returning only first 2 responses for first run
+        def _run_concurrent_partial(model, prompt_iter, max_in_flight, **_):
+            for index, _prompt in prompt_iter:
+                if index < 2: # Only yield first 2
+                    yield index, _build_response(f"resp-{index}")
+
+        mock_client.run_concurrent.side_effect = _run_concurrent_partial
+        mock_client_registry.get.return_value = Mock(return_value=mock_client)
+
+        mock_telemetry = Mock()
+        mock_telemetry.window.return_value = []
+        mock_telemetry.readings.return_value = []
+        mock_session.return_value.__enter__.return_value = mock_telemetry
+
+        # Simulate saving the first 2 records
+        output_dir = tmp_path / "profile_UNKNOWN_HW_test_model_bs1"
+        output_dir.mkdir()
+        
+        # Create a dummy Dataset that mimics what would be saved
+        partial_records = [
+            ProfilingRecord(
+                dataset_index=0, problem="p0", answer="a0", request_start_time=0.0, request_end_time=1.0,
+                model_answers={"test-model": "resp-0"},
+                model_metrics={"test-model": ModelMetrics()}
+            ),
+            ProfilingRecord(
+                dataset_index=1, problem="p1", answer="a1", request_start_time=0.0, request_end_time=1.0,
+                model_answers={"test-model": "resp-1"},
+                model_metrics={"test-model": ModelMetrics()}
+            ),
+        ]
+        mock_dataset_class.from_list(asdict(r) for r in partial_records).save_to_disk(str(output_dir))
+
+        # --- Second run (resumption) ---
+        mock_loaded_dataset_for_resume = MagicMock() # Use MagicMock for iterability
+        mock_loaded_dataset_for_resume.__iter__.return_value = iter(asdict(r) for r in partial_records)
+        mock_dataset_class.load_from_disk.return_value = mock_loaded_dataset_for_resume
+        
+        # Client should now only be called for remaining queries (index 2, 3, 4)
+        mock_client_registry.get.reset_mock() # Reset mock to check calls in resume run
+        mock_client.run_concurrent.reset_mock()
+        mock_client.run_concurrent.side_effect = None # Clear previous side effect
+        
+        processed_indices_in_resume = []
+        def _run_concurrent_resume(model, prompt_iter, max_in_flight, **_):
+            for index, _prompt in prompt_iter:
+                processed_indices_in_resume.append(index)
+                yield index, _build_response(f"resp-{index}")
+
+        mock_client.run_concurrent.side_effect = _run_concurrent_resume
+        mock_client_registry.get.return_value = Mock(return_value=mock_client)
+
+        config = ProfilerConfig(
+            model="test-model",
+            client_id="test-client",
+            dataset_id="test-dataset",
+            output_dir=tmp_path,
+        )
+        runner = ProfilerRunner(config)
+        runner.run()
+
+        # Verify that client.run_concurrent was called with prompts for index 2, 3, 4
+        assert processed_indices_in_resume == [2, 3, 4]
+        assert len(runner._records) == 5 # All 5 records should be present after resume
+
