@@ -54,6 +54,11 @@ class RegistryBase(Generic[T]):
             ) from exc
 
     @classmethod
+    def has(cls, key: str) -> bool:
+        """Return True when the registry contains the key."""
+        return key in cls._entries()
+
+    @classmethod
     def create(cls, key: str, *args: Any, **kwargs: Any) -> Any:
         entry = cls.get(key)
         if not callable(entry):
