@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from ..analysis.base import AnalysisProvider
     from ..clients.base import InferenceClient
     from ..datasets.base import DatasetProvider
+    from ..evaluation.base import EvaluationHandler
     from ..visualization.base import VisualizationProvider
 
 T = TypeVar("T")
@@ -53,6 +54,11 @@ class RegistryBase(Generic[T]):
             ) from exc
 
     @classmethod
+    def has(cls, key: str) -> bool:
+        """Return True when the registry contains the key."""
+        return key in cls._entries()
+
+    @classmethod
     def create(cls, key: str, *args: Any, **kwargs: Any) -> Any:
         entry = cls.get(key)
         if not callable(entry):
@@ -84,3 +90,7 @@ class AnalysisRegistry(RegistryBase[Type["AnalysisProvider"]]):
 
 class VisualizationRegistry(RegistryBase[Type["VisualizationProvider"]]):
     """Registry for visualization providers."""
+
+
+class EvaluationRegistry(RegistryBase[Type["EvaluationHandler"]]):
+    """Registry for evaluation handlers."""

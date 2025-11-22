@@ -2,16 +2,19 @@
 
 Python package for profiling and analyzing inference service performance across hardware configurations.
 
+CLI quick start: `ipw profile --client <id> --model <name> --dataset <dataset_id>` runs profiling and then immediately scores the run to produce Intelligence Per Watt metrics in the output directory.
+
 ## Project Structure
 
 ```
 src/ipw/
 ├── analysis/          Analysis implementations (regression)
 ├── cli/               Command-line interface (profile, analyze, plot, list, energy)
-├── clients/           Inference service clients (ollama)
+├── clients/           Inference service clients (ollama, vLLM, OpenAI eval)
 ├── core/              Component registration and shared types
 ├── datasets/          Dataset providers (built-in Intelligence Per Watt dataset)
 ├── execution/         Profiling orchestration and telemetry collection
+├── evaluation/        Judge handlers used during scoring
 ├── telemetry/         Energy monitoring integration (gRPC client, launcher)
 ├── tests/             Test suite
 └── visualization/     Plotting and visualization (KDE, regression plots)
@@ -19,7 +22,7 @@ src/ipw/
 
 ## Installation
 
-Install from the repository root when you only need the CLI:
+Install from the repository root:
 
 ```bash
 # from the repo root
@@ -64,6 +67,58 @@ Run specific test modules:
 pytest src/ipw/tests/clients/
 pytest src/ipw/tests/analysis/test_regression.py
 ```
+
+## Evaluation and accuracy metrics
+
+Accuracy is produced by the `accuracy` analysis. Profiling collects responses,
+then runs this analysis to score each answer with a judge model and persist the
+results back into the saved dataset.
+
+### Requirements
+
+- Set `IPW_EVAL_API_KEY` or `OPENAI_API_KEY` for the judge endpoint. If both are
+  set and differ, `IPW_EVAL_API_KEY` is used. Keys in a `.env` file are loaded
+  automatically. The `ipw` dataset will fail fast if a key is missing.
+- The default judge provider is OpenAI-compatible at
+  `https://api.openai.com/v1` with model
+  `gpt-5-nano-2025-08-07`. This is the recommended default for IPW scoring; if
+  you need to use a different judge, set `--eval-base-url`, `--eval-model`, and
+  `--eval-client`.
+
+### Typical flow
+
+Run profiling as usual; when it finishes, the CLI immediately runs the accuracy
+analysis on the output directory:
+
+```bash
+ipw profile \
+  --client <client_id> \
+  --model <model_name> \
+  --eval-client openai \
+  --eval-base-url https://api.openai.com/v1 \
+  --eval-model gpt-5-nano-2025-08-07 \
+  --dataset ipw \
+  --output-dir /path/to/runs
+```
+
+What gets written:
+- Each record gains `model_metrics[<model>]["evaluation"]` with `is_correct` and
+  a JSON `metadata` payload from the scorer.
+- `<run>/analysis/accuracy.json` summarizes `correct`, `incorrect`,
+  `unevaluated`, and overall accuracy.
+
+### Manually re-running accuracy
+
+If you need to backfill (for example, after adding an API key) or re-score a
+run, execute:
+
+```bash
+ipw analyze /path/to/profile_RUN --analysis accuracy --option model=<model_name>
+```
+
+When only one model exists in the dataset you can omit `--option model=...`.
+The analysis only evaluates rows where `evaluation.is_correct` is missing, so
+reruns are safe and idempotent.
 
 ## Extending Intelligence Per Watt
 

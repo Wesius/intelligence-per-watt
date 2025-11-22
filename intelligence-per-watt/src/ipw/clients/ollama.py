@@ -81,8 +81,39 @@ class OllamaClient(InferenceClient):
     def _build_payload(
         self, model: str, prompt: str, params: Mapping[str, Any]
     ) -> dict[str, Any]:
-        payload = dict(params)
-        payload["model"] = model
-        payload["prompt"] = prompt
-        payload["stream"] = True
+        payload: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "stream": True,
+        }
+
+        options: dict[str, Any] = {}
+        # Normalize/alias max token controls and enforce a default cap.
+        if "max_tokens" in params and "num_predict" not in params:
+            options["num_predict"] = params.get("max_tokens")
+        if "num_predict" in params:
+            options["num_predict"] = params["num_predict"]
+
+        # Recognized top-level fields the Ollama client accepts directly.
+        passthrough_keys = {
+            "system",
+            "template",
+            "context",
+            "format",
+            "images",
+            "keep_alive",
+            "raw",
+        }
+
+        for key, value in params.items():
+            if key in {"max_tokens", "num_predict"}:
+                continue
+            if key in passthrough_keys:
+                payload[key] = value
+            else:
+                options[key] = value
+
+        options.setdefault("num_predict", 4096)
+        if options:
+            payload["options"] = options
         return payload

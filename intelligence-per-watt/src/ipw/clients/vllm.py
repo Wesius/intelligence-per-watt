@@ -20,14 +20,6 @@ from ..core.registry import ClientRegistry
 from ..core.types import ChatUsage, Response
 from .base import InferenceClient
 
-DEFAULT_WARMUP_COUNT = 10
-DEFAULT_WARMUP_MAX_TOKENS = 8
-_WARMUP_PROMPTS = (
-    "This is a warmup prompt.",
-    "Hello from the vLLM warmup.",
-    "Intelligence Per Watt warmup query.",
-)
-
 
 class _AsyncLoopRunner:
     """Run an asyncio event loop in a background thread."""
@@ -90,9 +82,6 @@ class VLLMClient(InferenceClient):
             "top_k": 20,
             "min_p": 0.0,
         }
-        self._warmup_count = DEFAULT_WARMUP_COUNT
-        self._warmup_max_tokens = DEFAULT_WARMUP_MAX_TOKENS
-        self._warmup_done = False
         self._engine = None
         self._engine_args = None
         self._model_name = None
@@ -104,7 +93,6 @@ class VLLMClient(InferenceClient):
         if self._closed:
             raise RuntimeError("vLLM client has been closed")
         self._ensure_engine(model)
-        self._warmup_if_needed()
 
     def stream_chat_completion(
         self, model: str, prompt: str, **params: Any
@@ -112,7 +100,6 @@ class VLLMClient(InferenceClient):
         if self._closed:
             raise RuntimeError("vLLM client has been closed")
         self._ensure_engine(model)
-        self._warmup_if_needed()
 
         sampling_params = self._build_sampling_params(params)
         request_id = str(params.get("request_id", uuid.uuid4()))
@@ -164,32 +151,6 @@ class VLLMClient(InferenceClient):
         except Exception as exc:  # pragma: no cover - forwarded to caller
             raise RuntimeError(f"Failed to initialize vLLM engine: {exc}") from exc
         self._model_name = model
-
-    def _warmup_if_needed(self) -> None:
-        if self._warmup_done or self._warmup_count <= 0:
-            return
-        runner = self._loop_runner
-        if runner is None:
-            raise RuntimeError("vLLM client is shut down")
-
-        prompts = _WARMUP_PROMPTS or ("Warmup prompt",)
-        sampling = SamplingParams(
-            max_tokens=self._warmup_max_tokens,
-            temperature=0.0,
-            top_p=1.0,
-            output_kind=RequestOutputKind.DELTA,
-        )
-
-        for idx in range(self._warmup_count):
-            prompt = prompts[idx % len(prompts)]
-            request_id = f"warmup-{idx}-{uuid.uuid4()}"
-            runner.run(
-                self._stream_response(
-                    prompt=prompt, request_id=request_id, sampling_params=sampling
-                )
-            )
-
-        self._warmup_done = True
 
     def _build_sampling_params(self, params: Mapping[str, Any]):
         recognized = {
