@@ -76,8 +76,9 @@ Return **only** a JSON object that matches the provided schema:
         if not reference.strip():
             raise RuntimeError("WildChatHandler requires a non-empty reference answer.")
 
-        # Avoid self-comparison is not necessary here because we always compare
-        # candidate vs reference.
+        # Perform two comparisons: (model_answer vs reference) and (reference vs model_answer).
+        # This accounts for possible asymmetry in the evaluation. Self-comparison is not a concern,
+        # as this function is always called with distinct candidate and reference answers.
         verdict1, response1 = self._get_judge_verdict(problem, model_answer, reference)
         verdict2, response2 = self._get_judge_verdict(problem, reference, model_answer)
 
