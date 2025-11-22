@@ -42,11 +42,8 @@ def ensure_registered() -> None:
 
 
 def _register_if_missing(client_id: str, module: ModuleType, class_name: str) -> None:
-    try:
-        ClientRegistry.get(client_id)
+    if ClientRegistry.has(client_id):
         return
-    except KeyError:
-        pass
 
     client_cls = getattr(module, class_name, None)
     if client_cls is None:
