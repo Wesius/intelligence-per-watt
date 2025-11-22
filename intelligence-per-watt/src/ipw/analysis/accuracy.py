@@ -21,6 +21,7 @@ class _AccuracyCounters:
     correct: int = 0
     incorrect: int = 0
     unevaluated: int = 0
+    failed: int = 0
 
 
 @AnalysisRegistry.register("accuracy")
@@ -59,6 +60,7 @@ class AccuracyAnalysis(AnalysisProvider):
             model_metrics = row.get("model_metrics") or {}
             metrics = model_metrics.get(active_model) or {}
             evaluation = _to_mapping(metrics.get("evaluation"))
+            metadata = _parse_metadata(evaluation.get("metadata")) if evaluation else {}
             model_answers = row.get("model_answers") or {}
             model_answer = model_answers.get(active_model)
             
@@ -73,6 +75,10 @@ class AccuracyAnalysis(AnalysisProvider):
             
             if not evaluation:
                 counters.unevaluated += 1
+                continue
+            
+            if metadata.get("evaluation_failed"):
+                counters.failed += 1
                 continue
 
             is_correct = evaluation.get("is_correct")
@@ -93,6 +99,7 @@ class AccuracyAnalysis(AnalysisProvider):
             "correct": counters.correct,
             "incorrect": counters.incorrect,
             "unevaluated": counters.unevaluated,
+            "failed": counters.failed,
             "total_scored": total_scored,
             "accuracy": accuracy,
         }
@@ -110,6 +117,10 @@ class AccuracyAnalysis(AnalysisProvider):
         if counters.unevaluated:
             warnings.append(
                 f"{counters.unevaluated} records remain unevaluated for model '{active_model}'."
+            )
+        if counters.failed:
+            warnings.append(
+                f"{counters.failed} records failed evaluation for model '{active_model}'."
             )
 
         artifact_payload = {
@@ -137,9 +148,14 @@ class AccuracyAnalysis(AnalysisProvider):
         for row in dataset:
             model_metrics = row.get("model_metrics") or {}
             metrics = model_metrics.get(model_name) or {}
-            evaluation = metrics.get("evaluation")
-            # If evaluation is missing or is_correct is None, we need to evaluate
-            if not evaluation or evaluation.get("is_correct") is None:
+            evaluation = _to_mapping(metrics.get("evaluation"))
+            if not evaluation:
+                return True
+            is_correct = evaluation.get("is_correct")
+            if is_correct is None:
+                metadata = _parse_metadata(evaluation.get("metadata"))
+                if metadata.get("evaluation_failed"):
+                    continue
                 return True
         return False
 
@@ -294,13 +310,22 @@ class AccuracyAnalysis(AnalysisProvider):
             return provider.score(record, response)
         except Exception as e:
             LOGGER.warning(f"Scoring failed: {e}")
-            return None, {"error": str(e)}
+            return None, {"error": str(e), "evaluation_failed": True}
 
 
 def _to_mapping(value: Any) -> Mapping[str, Any]:
     if isinstance(value, Mapping):
         return value
     return {}
+
+
+def _parse_metadata(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return {}
+    return _to_mapping(value)
 
 
 __all__ = ["AccuracyAnalysis"]

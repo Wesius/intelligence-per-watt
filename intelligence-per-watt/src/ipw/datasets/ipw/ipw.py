@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from importlib import resources
 from pathlib import Path
 from typing import (Any, Dict, Iterable, Iterator, MutableMapping, Optional,
@@ -98,9 +99,6 @@ class IPWDataset(DatasetProvider):
 
     def verify_requirements(self) -> list[str]:
         issues: list[str] = []
-        # Evaluation uses the OpenAI-compatible client; prefer IPW_EVAL_API_KEY, fallback to OPENAI_API_KEY.
-        import os
-
         if not (os.getenv("IPW_EVAL_API_KEY") or os.getenv("OPENAI_API_KEY")):
             issues.append(
                 "Missing evaluation API key. Set IPW_EVAL_API_KEY (preferred) or OPENAI_API_KEY for scoring."
