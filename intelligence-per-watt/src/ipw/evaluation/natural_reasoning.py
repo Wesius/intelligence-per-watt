@@ -84,8 +84,8 @@ class NaturalReasoningHandler(EvaluationHandler):
             max_output_tokens=10,
         )
 
-        # Match 'true' / 'false' anywhere in the response, case-insensitive.
-        m = re.search(r"\b(true|false)\b", raw, flags=re.IGNORECASE)
+        # Match 'true' / 'false' as the entire response, case-insensitive, allowing for whitespace.
+        m = re.search(r"^\s*(true|false)\s*$", raw, flags=re.IGNORECASE)
         norm = m.group(1).lower() if m else ""
         result = norm == "true"
 
