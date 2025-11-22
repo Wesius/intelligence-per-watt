@@ -8,7 +8,11 @@ from .base import DatasetProvider
 
 def ensure_registered() -> None:
     """Import built-in dataset providers to populate the registry."""
-    from . import ipw  # noqa: F401
+    from . import (  # noqa: F401
+        ipw,
+        mmlu_pro,
+        supergpqa,
+    )
 
 
 __all__ = ["DatasetProvider", "ensure_registered"]

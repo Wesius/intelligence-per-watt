@@ -114,6 +114,7 @@ def profile(
             raise click.ClickException(
                 "Dataset requirements not satisfied:\n- " + "\n- ".join(issues)
             )
+        _warn_on_custom_eval(dataset_instance, eval_client, eval_base_url, eval_model)
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -143,3 +144,36 @@ def profile(
 
 
 __all__ = ["profile"]
+
+
+def _warn_on_custom_eval(
+    dataset, eval_client: str | None, eval_base_url: str | None, eval_model: str | None
+) -> None:
+    client_default = getattr(dataset, "eval_client", None)
+    base_default = getattr(dataset, "eval_base_url", None)
+    model_default = getattr(dataset, "eval_model", None)
+
+    provided_client = (eval_client or "").strip().lower()
+    expected_client = (client_default or "").strip().lower()
+    client_mismatch = bool(client_default and eval_client and provided_client != expected_client)
+
+    provided_base = (eval_base_url or "").strip()
+    expected_base = (base_default or "").strip()
+    base_mismatch = bool(base_default and eval_base_url and provided_base != expected_base)
+
+    provided_model = (eval_model or "").strip()
+    expected_model = (model_default or "").strip()
+    model_mismatch = bool(model_default and eval_model and provided_model != expected_model)
+
+    if not (client_mismatch or base_mismatch or model_mismatch):
+        return
+
+    warning(
+        "Using custom evaluation settings for %s. Defaults: client=%s, base_url=%s, model=%s."
+        % (
+            getattr(dataset, "dataset_name", dataset.__class__.__name__),
+            client_default or "(unspecified)",
+            base_default or "(unspecified)",
+            model_default or "(unspecified)",
+        )
+    )
