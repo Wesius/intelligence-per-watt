@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from typing import Any, Dict, Mapping
+from dataclasses import dataclass, field
+from typing import Any, Dict, Mapping, Sequence
 
 from tqdm.auto import tqdm
 
@@ -22,6 +24,83 @@ class _AccuracyCounters:
     incorrect: int = 0
     unevaluated: int = 0
     failed: int = 0
+
+
+@dataclass(slots=True)
+class _EfficiencyAccumulator:
+    energy_joules: list[float] = field(default_factory=list)
+    power_watts: list[float] = field(default_factory=list)
+    latency_seconds: list[float] = field(default_factory=list)
+    correct_with_energy: int = 0
+    total_with_energy: int = 0
+    correct_with_power: int = 0
+    total_with_power: int = 0
+    derived_power_samples: int = 0
+    power_metric_samples: int = 0
+    zero_energy_values: int = 0
+    zero_power_values: int = 0
+
+    def register(
+        self,
+        *,
+        is_correct: bool,
+        energy_joules: Any,
+        latency_seconds: Any,
+        power_watts: Any,
+    ) -> None:
+        energy_value, energy_provided = _normalize_positive_number(energy_joules)
+        latency_value, _ = _normalize_positive_number(latency_seconds)
+        power_value, power_provided = _normalize_positive_number(power_watts)
+
+        if latency_value is not None:
+            self.latency_seconds.append(latency_value)
+
+        if energy_value is not None:
+            self.energy_joules.append(energy_value)
+            self.total_with_energy += 1
+            if is_correct:
+                self.correct_with_energy += 1
+        elif energy_provided and _is_non_positive(energy_joules):
+            self.zero_energy_values += 1
+
+        derived_power = None
+        if energy_value is not None and latency_value is not None:
+            derived_power = energy_value / latency_value
+            if not (math.isfinite(derived_power) and derived_power > 0):
+                derived_power = None
+
+        power_source = None
+        chosen_power = None
+        if derived_power is not None:
+            chosen_power = derived_power
+            power_source = "derived"
+        elif power_value is not None:
+            chosen_power = power_value
+            power_source = "power_metrics"
+
+        if chosen_power is not None:
+            self.power_watts.append(chosen_power)
+            self.total_with_power += 1
+            if is_correct:
+                self.correct_with_power += 1
+            if power_source == "derived":
+                self.derived_power_samples += 1
+            elif power_source == "power_metrics":
+                self.power_metric_samples += 1
+        elif power_provided and _is_non_positive(power_watts):
+            self.zero_power_values += 1
+
+    @property
+    def energy_accuracy(self) -> float | None:
+        if self.total_with_energy == 0:
+            return None
+        return self.correct_with_energy / self.total_with_energy
+
+    @property
+    def power_accuracy(self) -> float | None:
+        if self.total_with_power == 0:
+            return None
+        return self.correct_with_power / self.total_with_power
 
 
 @AnalysisRegistry.register("accuracy")
@@ -52,6 +131,7 @@ class AccuracyAnalysis(AnalysisProvider):
 
         # Aggregate results
         counters = _AccuracyCounters()
+        efficiency = _EfficiencyAccumulator()
         records: list[Dict[str, Any]] = []
         
         # Iterate directly over the HF dataset rows
@@ -59,10 +139,16 @@ class AccuracyAnalysis(AnalysisProvider):
         for row in dataset:
             model_metrics = row.get("model_metrics") or {}
             metrics = model_metrics.get(active_model) or {}
+            energy_metrics = _to_mapping(metrics.get("energy_metrics"))
+            power_metrics = _to_mapping(metrics.get("power_metrics"))
+            latency_metrics = _to_mapping(metrics.get("latency_metrics"))
             evaluation = _to_mapping(metrics.get("evaluation"))
             metadata = _parse_metadata(evaluation.get("metadata")) if evaluation else {}
             model_answers = row.get("model_answers") or {}
             model_answer = model_answers.get(active_model)
+            energy_joules = energy_metrics.get("per_query_joules")
+            latency_seconds = latency_metrics.get("total_query_seconds")
+            power_watts = _extract_power_value(power_metrics)
             
             records.append(
                 {
@@ -89,9 +175,50 @@ class AccuracyAnalysis(AnalysisProvider):
             else:
                 counters.unevaluated += 1
 
+            if isinstance(is_correct, bool):
+                efficiency.register(
+                    is_correct=is_correct,
+                    energy_joules=energy_joules,
+                    latency_seconds=latency_seconds,
+                    power_watts=power_watts,
+                )
+
         total_scored = counters.correct + counters.incorrect
         accuracy = (
             counters.correct / total_scored if total_scored > 0 else None
+        )
+
+        power_stats = _summarize_series(efficiency.power_watts)
+        latency_stats = _summarize_series(efficiency.latency_seconds)
+        avg_power = power_stats.get("avg")
+        avg_latency = latency_stats.get("avg")
+
+        energy_values: list[float] = list(efficiency.energy_joules)
+        imputed_energy = None
+        if (
+            efficiency.zero_energy_values
+            and avg_power is not None
+            and avg_power > 0
+            and avg_latency is not None
+            and avg_latency > 0
+        ):
+            imputed_energy = avg_power * avg_latency
+            energy_values.extend([imputed_energy] * efficiency.zero_energy_values)
+
+        energy_stats = _summarize_series(
+            energy_values, include_total=True
+        )
+        avg_energy = energy_stats.get("avg")
+
+        intelligence_per_joule = (
+            (accuracy / avg_energy)
+            if accuracy is not None and avg_energy and avg_energy > 0
+            else None
+        )
+        intelligence_per_watt = (
+            (accuracy / avg_power)
+            if accuracy is not None and avg_power and avg_power > 0
+            else None
         )
 
         summary_payload: Dict[str, Any] = {
@@ -102,6 +229,30 @@ class AccuracyAnalysis(AnalysisProvider):
             "failed": counters.failed,
             "total_scored": total_scored,
             "accuracy": accuracy,
+            "intelligence_per_joule": intelligence_per_joule,
+            "intelligence_per_watt": intelligence_per_watt,
+            "avg_per_query_energy_joules": energy_stats.get("avg"),
+            "avg_per_query_power_watts": power_stats.get("avg"),
+            "energy_sample_count": energy_stats.get("count"),
+            "power_sample_count": power_stats.get("count"),
+        }
+
+        efficiency_payload = {
+            "intelligence_per_joule": intelligence_per_joule,
+            "intelligence_per_watt": intelligence_per_watt,
+            "energy": {
+                **energy_stats,
+                "accuracy": efficiency.energy_accuracy,
+                "zero_values": efficiency.zero_energy_values,
+                "imputed_from_power": imputed_energy,
+            },
+            "power": {
+                **power_stats,
+                "accuracy": efficiency.power_accuracy,
+                "zero_values": efficiency.zero_power_values,
+                "derived_power_samples": efficiency.derived_power_samples,
+                "power_metric_samples": efficiency.power_metric_samples,
+            },
         }
 
         data_payload: Dict[str, Any] = {
@@ -111,6 +262,7 @@ class AccuracyAnalysis(AnalysisProvider):
             "records": {
                 active_model: records,
             },
+            "efficiency": {active_model: efficiency_payload},
         }
 
         warnings = []
@@ -121,6 +273,27 @@ class AccuracyAnalysis(AnalysisProvider):
         if counters.failed:
             warnings.append(
                 f"{counters.failed} records failed evaluation for model '{active_model}'."
+            )
+        if energy_stats.get("count", 0) == 0:
+            warnings.append(
+                f"No per-query energy measurements found for model '{active_model}'; intelligence_per_joule unavailable."
+            )
+        elif efficiency.zero_energy_values:
+            if imputed_energy is not None:
+                warnings.append(
+                    f"Imputed energy for {efficiency.zero_energy_values} zero/negative readings using avg power * avg latency for model '{active_model}'."
+                )
+            else:
+                warnings.append(
+                    f"Ignored {efficiency.zero_energy_values} non-positive per-query energy values while computing efficiency metrics for model '{active_model}'."
+                )
+        if power_stats.get("count", 0) == 0:
+            warnings.append(
+                f"No per-query power measurements found for model '{active_model}'; intelligence_per_watt unavailable."
+            )
+        elif efficiency.zero_power_values:
+            warnings.append(
+                f"Ignored {efficiency.zero_power_values} non-positive per-query power values while computing efficiency metrics for model '{active_model}'."
             )
 
         artifact_payload = {
@@ -326,6 +499,76 @@ def _parse_metadata(value: Any) -> Mapping[str, Any]:
         except Exception:
             return {}
     return _to_mapping(value)
+
+
+_EPSILON = 1e-12
+
+
+def _summarize_series(
+    values: Sequence[float], *, include_total: bool = False
+) -> Dict[str, Any]:
+    if not values:
+        summary: Dict[str, Any] = {
+            "count": 0,
+            "avg": None,
+            "median": None,
+            "min": None,
+            "max": None,
+        }
+        if include_total:
+            summary["total"] = None
+        return summary
+
+    summary = {
+        "count": len(values),
+        "avg": statistics.fmean(values),
+        "median": statistics.median(values),
+        "min": min(values),
+        "max": max(values),
+    }
+    if include_total:
+        summary["total"] = sum(values)
+    return summary
+
+
+def _normalize_positive_number(value: Any) -> tuple[float | None, bool]:
+    if value is None:
+        return None, False
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None, True
+    if not math.isfinite(number):
+        return None, True
+    if number <= _EPSILON:
+        return None, True
+    return number, True
+
+
+def _is_non_positive(value: Any) -> bool:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number <= _EPSILON
+
+
+def _extract_power_value(power_metrics: Mapping[str, Any]) -> float | None:
+    gpu_metrics = power_metrics.get("gpu")
+    if not isinstance(gpu_metrics, Mapping):
+        return None
+    per_query = gpu_metrics.get("per_query_watts")
+    if not isinstance(per_query, Mapping):
+        return None
+    for key in ("avg", "median", "max", "min"):
+        raw_value = per_query.get(key)
+        try:
+            candidate = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(candidate):
+            return candidate
+    return None
 
 
 __all__ = ["AccuracyAnalysis"]

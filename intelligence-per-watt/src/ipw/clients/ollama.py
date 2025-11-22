@@ -82,6 +82,10 @@ class OllamaClient(InferenceClient):
         self, model: str, prompt: str, params: Mapping[str, Any]
     ) -> dict[str, Any]:
         payload = dict(params)
+        # Normalize/alias max token controls and enforce a default cap.
+        if "max_tokens" in payload and "num_predict" not in payload:
+            payload["num_predict"] = payload.pop("max_tokens")
+        payload.setdefault("num_predict", 4096)
         payload["model"] = model
         payload["prompt"] = prompt
         payload["stream"] = True
