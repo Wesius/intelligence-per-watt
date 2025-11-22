@@ -278,15 +278,17 @@ class ProfilerRunner:
         if candidate and (self._hardware_label in (None, "UNKNOWN_HW")):
             self._hardware_label = candidate
 
-    def _get_output_path(self) -> Path:
+    def _get_output_path(self, dataset_label: str | None = None) -> Path:
         if self._output_path is not None:
             return self._output_path
 
         hardware_label = self._hardware_label or "UNKNOWN_HW"
         model_slug = _slugify_model(self._config.model)
+        dataset_segment = dataset_label or self._config.dataset_id or "dataset"
+        dataset_segment = str(dataset_segment).strip() or "dataset"
         default_runs_dir = Path(__file__).resolve().parents[4] / "runs"
         base_dir = self._config.output_dir or default_runs_dir
-        profile_dir = f"profile_{hardware_label}_{model_slug}".strip("_")
+        profile_dir = f"profile_{hardware_label}_{model_slug}_{dataset_segment}".strip("_")
 
         output_path = Path(base_dir) / profile_dir
 
@@ -352,7 +354,13 @@ class ProfilerRunner:
         if not self._records:
             return
 
-        output_path = self._get_output_path()
+        dataset_label = (
+            getattr(dataset, "dataset_name", None)
+            or getattr(dataset, "dataset_id", None)
+            or self._config.dataset_id
+        )
+
+        output_path = self._get_output_path(str(dataset_label).strip() or self._config.dataset_id)
         if output_path.exists():
             self._confirm_overwrite(output_path)
             shutil.rmtree(output_path)

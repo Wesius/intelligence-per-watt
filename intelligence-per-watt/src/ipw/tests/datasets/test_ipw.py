@@ -120,8 +120,7 @@ class TestIPWDatasetScoring:
     
     def test_score_raises_error_for_unmapped_dataset(self, mock_registries) -> None:
         ipw_dataset = IPWDataset()
-        
-        # Create a mock record with an unmapped dataset_name
+
         record = DatasetRecord(
             problem="fallback problem",
             answer="fallback answer",
@@ -130,7 +129,7 @@ class TestIPWDatasetScoring:
                 "dataset_metadata": json.dumps({
                     "config": {
                         "dataset_name": "unmapped/dataset",
-                        "verification_method": "math-500" # Should be IGNORED now
+                        "verification_method": "math-500"
                     }
                 })
             }

@@ -157,9 +157,10 @@ class TestProfilerRunner:
         runner.run()
 
         # Check that output directory was created
-        assert (tmp_path / "profile_UNKNOWN_HW_test_model").exists()
+        expected_dir = tmp_path / "profile_UNKNOWN_HW_test_model_Test Dataset"
+        assert expected_dir.exists()
         # Check that summary.json was written
-        summary_path = tmp_path / "profile_UNKNOWN_HW_test_model" / "summary.json"
+        summary_path = expected_dir / "summary.json"
         assert summary_path.exists()
 
         summary = json.loads(summary_path.read_text())
@@ -520,5 +521,4 @@ class TestProfilerRunner:
         runner._hardware_label = "RTX3090"
 
         path = runner._get_output_path()
-        assert "RTX3090" in str(path)
-        assert "llama_3_2_1b" in str(path)
+        assert path == tmp_path / "profile_RTX3090_llama_3_2_1b_test"

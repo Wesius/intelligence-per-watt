@@ -13,6 +13,11 @@ class DatasetProvider(ABC):
     dataset_id: str
     dataset_name: str
 
+    # Preferred evaluation settings (datasets may override)
+    eval_client: str | None = "openai"
+    eval_base_url: str | None = "https://api.openai.com/v1"
+    eval_model: str | None = "gpt-5-nano-2025-08-07"
+
     def __iter__(self) -> Iterator[DatasetRecord]:
         return iter(self.iter_records())
 

@@ -17,8 +17,6 @@ from ...core.types import DatasetRecord
 from ..base import DatasetProvider
 
 _DEFAULT_DATASET_DIR = "mixed_1k_seed1_base"
-_DEFAULT_JUDGE_MODEL = "gpt-5-nano-2025-08-07"
-_DEFAULT_JUDGE_BASE_URL = "https://api.openai.com/v1"
 
 
 def _default_dataset_path() -> Path:
@@ -144,14 +142,7 @@ class IPWDataset(DatasetProvider):
                 f"Supported datasets: {', '.join(sorted(VERIFICATION_MAPPING.keys()))}"
             )
 
-        # Instantiate the judge client (default: OpenAI-compatible/OpenRouter)
-        judge_client = eval_client or ClientRegistry.create(
-            "openai",
-            base_url=_DEFAULT_JUDGE_BASE_URL,
-            model=_DEFAULT_JUDGE_MODEL,
-        )
-
-        handler = EvaluationRegistry.create(evaluation_method, client=judge_client)
+        handler = self._resolve_handler(evaluation_method, eval_client)
 
         problem = record.problem
         reference = record.answer
@@ -163,6 +154,16 @@ class IPWDataset(DatasetProvider):
             metadata=meta,
         )
         return is_correct, eval_meta
+
+    def _resolve_handler(
+        self, evaluation_method: str, eval_client: Optional[InferenceClient]
+    ):
+        judge_client = eval_client or ClientRegistry.create(
+            self.eval_client or "openai",
+            base_url=self.eval_base_url or "https://api.openai.com/v1",
+            model=self.eval_model or "gpt-5-nano-2025-08-07",
+        )
+        return EvaluationRegistry.create(evaluation_method, client=judge_client)
 
 
 __all__ = ["IPWDataset"]
