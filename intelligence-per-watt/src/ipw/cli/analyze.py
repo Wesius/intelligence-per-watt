@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import json
-import textwrap
 from pathlib import Path
 from typing import Any, Dict
 
 import click
 
-from ..analysis.base import AnalysisContext, AnalysisResult
+from ..analysis.base import AnalysisContext
 from ..core.registry import AnalysisRegistry
-from ._console import info, warning
+from ._console import _print_result
 
 
 def _collect_options(ctx, param, values):
@@ -59,8 +57,12 @@ def analyze(
 ) -> None:
     """Compute analysis results for a profiling run."""
     import ipw.analysis
+    import ipw.clients
+    import ipw.datasets
 
     ipw.analysis.ensure_registered()
+    ipw.clients.ensure_registered()
+    ipw.datasets.ensure_registered()
 
     context = AnalysisContext(
         results_dir=directory,
@@ -79,38 +81,6 @@ def analyze(
         raise click.ClickException(str(exc)) from exc
 
     _print_result(result, verbose=verbose)
-
-
-def _print_result(result: AnalysisResult, *, verbose: bool) -> None:
-    info(f"Analysis: {result.analysis}")
-
-    if result.summary:
-        info("")
-        info("Summary:")
-        for key, value in result.summary.items():
-            info(f"  {key}: {value}")
-
-    if result.warnings:
-        info("")
-        info("Warnings:")
-        for warn_msg in result.warnings:
-            warning(f"  {warn_msg}")
-
-    if result.artifacts:
-        info("")
-        info("Artifacts:")
-        for name, path in result.artifacts.items():
-            info(f"  {name}: {path}")
-
-    if verbose and result.data:
-        info("")
-        info("Data:")
-        info(textwrap.indent(json.dumps(result.data, indent=2, default=str), "  "))
-
-    if verbose and result.metadata:
-        info("")
-        info("Metadata:")
-        info(textwrap.indent(json.dumps(result.metadata, indent=2, default=str), "  "))
 
 
 __all__ = ["analyze"]

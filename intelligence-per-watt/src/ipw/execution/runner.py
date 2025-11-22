@@ -16,29 +16,15 @@ from tqdm.auto import tqdm
 
 from ..clients.base import InferenceClient
 from ..core.registry import ClientRegistry, DatasetRegistry
-from ..core.types import (
-    DatasetRecord,
-    GpuInfo,
-    ProfilerConfig,
-    Response,
-    SystemInfo,
-    TelemetryReading,
-)
+from ..core.types import (DatasetRecord, GpuInfo, ProfilerConfig, Response,
+                          SystemInfo, TelemetryReading)
 from ..telemetry import EnergyMonitorCollector
 from .hardware import derive_hardware_label
 from .telemetry_session import TelemetrySample, TelemetrySession
-from .types import (
-    ComputeMetrics,
-    EnergyMetrics,
-    LatencyMetrics,
-    MemoryMetrics,
-    MetricStats,
-    ModelMetrics,
-    PowerComponentMetrics,
-    PowerMetrics,
-    ProfilingRecord,
-    TokenMetrics,
-)
+from .types import (ComputeMetrics, EnergyMetrics, LatencyMetrics,
+                    MemoryMetrics, MetricStats, ModelMetrics,
+                    PowerComponentMetrics, PowerMetrics, ProfilingRecord,
+                    TokenMetrics)
 
 
 class ProfilerRunner:
@@ -92,16 +78,8 @@ class ProfilerRunner:
 
         self._ensure_client_ready(client)
 
-        try:
-            with TelemetrySession(collector) as telemetry:
-                self._process_records(dataset, client, telemetry)
-        finally:
-            close_client = getattr(client, "close", None)
-            if callable(close_client):
-                try:
-                    close_client()
-                except Exception:
-                    pass
+        with TelemetrySession(collector) as telemetry:
+            self._process_records(dataset, client, telemetry)
 
         if not self._records:
             return
@@ -124,7 +102,7 @@ class ProfilerRunner:
                 response = self._invoke_client(client, record)
                 end = time.time()
                 samples = list(telemetry.window(start, end))
-                built = self._build_record(index, record, response, samples, start, end)
+                built = self._build_record(index, record, response, samples, start, end, dataset)
                 if built is not None:
                     self._records.append(built)
                     if len(self._records) % self._FLUSH_INTERVAL == 0:
@@ -139,6 +117,7 @@ class ProfilerRunner:
         samples: Sequence[TelemetrySample],
         start_time: float,
         end_time: float,
+        dataset=None,
     ) -> Optional[ProfilingRecord]:
         self._update_hardware_metadata(samples)
         telemetry_readings = [sample.reading for sample in samples]
@@ -212,7 +191,6 @@ class ProfilerRunner:
             ),
             gpu_info=self._gpu_info,
             system_info=self._system_info,
-            lm_correctness=False,
             lm_response=response.content,
         )
 
@@ -255,23 +233,20 @@ class ProfilerRunner:
         ):
             return EnergyMetrics()
 
-        per_query_delta = end_value - start_value
-        per_query = per_query_delta if per_query_delta >= 0 else None
+        # Check for counter reset within the query window
+        if end_value < start_value:
+            return EnergyMetrics()
 
-        reset_in_window = per_query_delta < 0
-        reset_between_queries = (
-            not reset_in_window
-            and self._last_energy_total is not None
-            and end_value < self._last_energy_total
-        )
+        per_query = end_value - start_value
 
-        if reset_in_window:
-            # Counter rolled backwards while we were sampling – drop this reading
-            # and anchor future totals to the post-reset value.
-            self._baseline_energy = end_value
-        elif self._baseline_energy is None or reset_between_queries:
-            # Either the first reading we've seen or a reset that occurred while
-            # the system was idle between queries.
+        if self._baseline_energy is None:
+            self._baseline_energy = start_value
+
+        # If the counter reset between queries (current start < last end), rebase baseline
+        if (
+            self._last_energy_total is not None
+            and start_value < self._last_energy_total
+        ):
             self._baseline_energy = start_value
 
         self._last_energy_total = end_value
@@ -374,6 +349,7 @@ class ProfilerRunner:
 
         summary = {
             "model": self._config.model,
+            "profiler_config": asdict(self._config),
             "dataset": getattr(dataset, "dataset_id", self._config.dataset_id),
             "dataset_name": getattr(dataset, "dataset_name", None),
             "hardware_label": self._hardware_label,
@@ -382,10 +358,9 @@ class ProfilerRunner:
             "system_info": asdict(self._system_info) if self._system_info else None,
             "gpu_info": asdict(self._gpu_info) if self._gpu_info else None,
             "output_dir": str(output_path),
-            "profiler_config": _jsonify(asdict(self._config)),
         }
         summary_path = output_path / "summary.json"
-        summary_path.write_text(json.dumps(summary, indent=2))
+        summary_path.write_text(json.dumps(summary, indent=2, default=str))
 
 
 def _stat_summary(values: Iterable[Optional[float]]) -> MetricStats:
@@ -402,15 +377,3 @@ def _stat_summary(values: Iterable[Optional[float]]) -> MetricStats:
 
 def _slugify_model(model: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in model).strip("_") or "model"
-
-
-def _jsonify(value: Any) -> Any:
-    """Recursively coerce values into JSON-serializable types."""
-
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Mapping):
-        return {str(key): _jsonify(val) for key, val in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return [_jsonify(item) for item in value]
-    return value

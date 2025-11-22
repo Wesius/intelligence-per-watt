@@ -44,5 +44,27 @@ class InferenceClient(ABC):
         """Optional hook to perform warmup before serving requests."""
         return None
 
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> str:
+        """
+        Synchronous chat completion helper.
+        
+        Default implementation wraps `stream_chat_completion`.
+        """
+        prompt = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
+        response = self.stream_chat_completion(
+            model="default", # Should be overridden or ignored by stream_chat_completion if not strict
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_output_tokens
+        )
+        return response.content
+
 
 __all__ = ["InferenceClient"]

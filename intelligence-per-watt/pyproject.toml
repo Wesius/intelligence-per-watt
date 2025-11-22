@@ -23,6 +23,7 @@ dependencies = [
     "pyarrow>=15",
     "tqdm>=4.66",
     "hf_transfer",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]

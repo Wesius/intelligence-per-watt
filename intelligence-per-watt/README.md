@@ -65,6 +65,51 @@ pytest src/ipw/tests/clients/
 pytest src/ipw/tests/analysis/test_regression.py
 ```
 
+## Evaluation and accuracy metrics
+
+Accuracy is produced by the `accuracy` analysis. Profiling collects responses,
+then runs this analysis to score each answer with a judge model and persist the
+results back into the saved dataset.
+
+### Requirements
+
+- Set `IPW_EVAL_API_KEY` (preferred) or `OPENAI_API_KEY` for the judge endpoint.
+  The OpenAI-compatible client defaults to `https://api.openai.com/v1` with
+  `gpt-4-turbo`. Keys in a `.env` file are loaded automatically. The `ipw`
+  dataset will fail fast if a key is missing.
+
+### Typical flow
+
+Run profiling as usual; when it finishes, the CLI immediately runs the accuracy
+analysis on the output directory:
+
+```bash
+ipw profile \
+  --client <client_id> \
+  --model <model_name> \
+  --dataset ipw \
+  --output-dir /path/to/runs
+```
+
+What gets written:
+- Each record gains `model_metrics[<model>]["evaluation"]` with `is_correct` and
+  a JSON `metadata` payload from the scorer.
+- `<run>/analysis/accuracy.json` summarizes `correct`, `incorrect`,
+  `unevaluated`, and overall accuracy.
+
+### Manually re-running accuracy
+
+If you need to backfill (for example, after adding an API key) or re-score a
+run, execute:
+
+```bash
+ipw analyze /path/to/profile_RUN --analysis accuracy --option model=<model_name>
+```
+
+When only one model exists in the dataset you can omit `--option model=...`.
+The analysis only evaluates rows where `evaluation.is_correct` is missing, so
+reruns are safe and idempotent.
+
 ## Extending Intelligence Per Watt
 
 Add matching tests under `src/ipw/tests/` whenever you add a client, dataset, analysis, or visualization so automated runs cover the new component.

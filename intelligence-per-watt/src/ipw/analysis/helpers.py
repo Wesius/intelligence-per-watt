@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Iterator, Mapping, Sequence
+from typing import Iterable, Iterator, Mapping, Sequence, cast
 
 from datasets import Dataset, DatasetDict, load_from_disk
 
@@ -88,11 +88,11 @@ def collect_run_metadata(
         if not system_info:
             maybe_system = entry.get("system_info")
             if isinstance(maybe_system, Mapping):
-                system_info = dict(maybe_system)
+                system_info = dict(cast(Mapping, maybe_system))
         if not gpu_info:
             maybe_gpu = entry.get("gpu_info")
             if isinstance(maybe_gpu, Mapping):
-                gpu_info = dict(maybe_gpu)
+                gpu_info = dict(cast(Mapping, maybe_gpu))
         if system_info and gpu_info:
             break
 
@@ -115,9 +115,67 @@ def _collect_available_models(dataset: Dataset) -> Sequence[str]:
     return list(dict.fromkeys(models))
 
 
+def compute_accuracy_summary(
+    dataset: Dataset,
+    model_name: str,
+) -> Mapping[str, object]:
+    """
+    Compute accuracy statistics for a given model within an evaluated dataset.
+
+    This helper assumes that each record's model_metrics entry for the target
+    model may contain an ``evaluation`` mapping with an ``is_correct`` boolean.
+    """
+
+    counters = {
+        "correct": 0,
+        "incorrect": 0,
+        "unevaluated": 0,
+    }
+
+    for example in dataset:
+        metrics_map = (
+            example.get("model_metrics") if isinstance(example, Mapping) else None
+        )
+        if not isinstance(metrics_map, Mapping):
+            counters["unevaluated"] += 1
+            continue
+        entry = metrics_map.get(model_name)
+        if not isinstance(entry, Mapping):
+            counters["unevaluated"] += 1
+            continue
+
+        evaluation = entry.get("evaluation")
+        if not isinstance(evaluation, Mapping):
+            counters["unevaluated"] += 1
+            continue
+
+        is_correct = evaluation.get("is_correct")
+        if is_correct is True:
+            counters["correct"] += 1
+        elif is_correct is False:
+            counters["incorrect"] += 1
+        else:
+            counters["unevaluated"] += 1
+
+    total_scored = counters["correct"] + counters["incorrect"]
+    accuracy = (
+        counters["correct"] / total_scored if total_scored > 0 else None
+    )
+
+    return {
+        "model": model_name,
+        "correct": counters["correct"],
+        "incorrect": counters["incorrect"],
+        "unevaluated": counters["unevaluated"],
+        "total_scored": total_scored,
+        "accuracy": accuracy,
+    }
+
+
 __all__ = [
     "collect_run_metadata",
     "iter_model_entries",
     "load_metrics_dataset",
     "resolve_model_name",
+    "compute_accuracy_summary",
 ]

@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from importlib import resources
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, MutableMapping
+from typing import (Any, Dict, Iterable, Iterator, MutableMapping, Optional,
+                    Tuple)
 
 from datasets import load_from_disk
 
-from ...core.registry import DatasetRegistry
+from ...core.registry import (ClientRegistry, DatasetRegistry,
+                              EvaluationRegistry)
 from ...core.types import DatasetRecord
 from ..base import DatasetProvider
 
@@ -92,6 +94,68 @@ class IPWDataset(DatasetProvider):
 
     def size(self) -> int:
         return len(self._records)
+
+    def verify_requirements(self) -> list[str]:
+        issues: list[str] = []
+        # Evaluation uses the OpenAI-compatible client; prefer IPW_EVAL_API_KEY, fallback to OPENAI_API_KEY.
+        import os
+
+        if not (os.getenv("IPW_EVAL_API_KEY") or os.getenv("OPENAI_API_KEY")):
+            issues.append(
+                "Missing evaluation API key. Set IPW_EVAL_API_KEY (preferred) or OPENAI_API_KEY for scoring."
+            )
+        return issues
+
+    def score(
+        self,
+        record: DatasetRecord,
+        response: str,
+    ) -> Tuple[Optional[bool], Dict[str, object]]:
+        """
+        Delegate scoring to a dataset-specific evaluation handler based on the
+        embedded metadata in this mixed dataset.
+        """
+        raw_meta = record.dataset_metadata.get("dataset_metadata")
+        if not isinstance(raw_meta, str):
+            raise RuntimeError("Missing or invalid 'dataset_metadata' field for scoring.")
+
+        meta = json.loads(raw_meta)
+        config = meta.get("config") or {}
+        
+        # Use a mapping from actual dataset_name to evaluation_method (handler key)
+        actual_dataset_name = config.get("dataset_name")
+        
+        # Define the mapping
+        VERIFICATION_MAPPING = {
+            "allenai/WildChat": "wildchat",
+            "facebook/natural_reasoning": "natural_reasoning",
+            "lmsys/lmsys-chat-1m": "wildchat",
+        }
+
+        evaluation_method = VERIFICATION_MAPPING.get(actual_dataset_name)
+
+        if not evaluation_method:
+            raise RuntimeError(
+                f"Could not determine evaluation method for dataset: {actual_dataset_name}. "
+                f"Supported datasets: {', '.join(sorted(VERIFICATION_MAPPING.keys()))}"
+            )
+
+        # Instantiate the OpenAI client for evaluation
+        # Configuration is now expected via environment variables or defaults in OpenAIClient
+        eval_client = ClientRegistry.create("openai")
+
+        handler = EvaluationRegistry.create(evaluation_method, client=eval_client)
+
+        problem = record.problem
+        reference = record.answer
+
+        is_correct, eval_meta = handler.evaluate(
+            problem=problem,
+            reference=reference,
+            model_answer=response,
+            metadata=meta,
+        )
+        return is_correct, eval_meta
 
 
 __all__ = ["IPWDataset"]

@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from importlib import metadata as importlib_metadata
 import platform
 import shlex
 import sys
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Dict
 
 import click
 from ipw.core.types import ProfilerConfig
 
-from ._console import success
+from ._console import _print_result, info, success, warning
 
 
 def _collect_params(ctx, param, values):
@@ -79,6 +79,7 @@ def profile(
     max_queries: int | None,
 ) -> None:
     """Execute profiling run with the execution pipeline."""
+    import ipw.analysis
     import ipw.clients
     import ipw.datasets
 
@@ -90,7 +91,12 @@ def profile(
         )
 
     ipw.datasets.ensure_registered()
-    from ipw.execution import ProfilerRunner  # Deferred import for heavy dependencies
+    ipw.analysis.ensure_registered()
+    
+    from ipw.analysis.base import AnalysisContext
+    from ipw.core.registry import AnalysisRegistry, DatasetRegistry
+    from ipw.execution import \
+        ProfilerRunner  # Deferred import for heavy dependencies
 
     config = ProfilerConfig(
         dataset_id=dataset_id,
@@ -104,9 +110,36 @@ def profile(
         run_metadata=_build_run_metadata(),
     )
 
+    # Preflight: dataset requirements
+    try:
+        dataset_cls = DatasetRegistry.get(dataset_id)
+        dataset_instance = dataset_cls(**dataset_param)
+        issues = dataset_instance.verify_requirements()
+        if issues:
+            raise click.ClickException(
+                "Dataset requirements not satisfied:\n- " + "\n- ".join(issues)
+            )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
     runner = ProfilerRunner(config)
     runner.run()
     success("Profiling run completed")
+    
+    # Trigger post-run analysis
+    results_dir = runner._output_path
+    if results_dir and results_dir.exists():
+        info("Running post-profile analysis...")
+        context = AnalysisContext(
+            results_dir=results_dir,
+            options={"model": model},
+        )
+        try:
+            analysis = AnalysisRegistry.create("accuracy")
+            result = analysis.run(context)
+            _print_result(result, verbose=False)
+        except Exception as e:
+            warning(f"Warning: Analysis failed: {e}")
 
 
 __all__ = ["profile"]
