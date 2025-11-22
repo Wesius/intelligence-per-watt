@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import (Any, Dict, Iterable, Iterator, MutableMapping, Optional,
                     Tuple)
 
+import ipw.evaluation  # noqa: F401  # register evaluation handlers
 from datasets import load_from_disk
 
 from ...core.registry import (ClientRegistry, DatasetRegistry,
