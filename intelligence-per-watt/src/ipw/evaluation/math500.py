@@ -66,7 +66,7 @@ Return ONLY a compact JSON object with these exact keys and types, no extra text
                 system_prompt=self.EXTRACT_PROMPT,
                 user_prompt=text,
                 temperature=0.0,
-                max_output_tokens=5,
+                max_output_tokens=100,
             )
             
             extracted = raw_response.strip()
