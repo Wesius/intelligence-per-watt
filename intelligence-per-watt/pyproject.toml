@@ -23,6 +23,7 @@ dependencies = [
     "pyarrow>=15",
     "tqdm>=4.66",
     "hf_transfer",
+    "python-dotenv",
 ]
 
 [project.optional-dependencies]
@@ -34,4 +35,4 @@ all = ["ollama", "vllm>=0.11.0"]
 ipw = "ipw.cli:main"
 
 [tool.uv_build]
-package-data = {"ipw.telemetry" = ["bin/**"], "ipw.datasets.ipw" = ["data/**"]}
+package-data = {"ipw" = ["py.typed"], "ipw.telemetry" = ["bin/**"], "ipw.datasets.ipw" = ["data/**"]}

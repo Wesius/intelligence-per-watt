@@ -21,7 +21,7 @@ class TestAnalyzeCommand:
         assert "Missing argument" in result.output or "Error" in result.output
 
     @patch("ipw.cli.analyze.AnalysisRegistry")
-    def test_runs_default_regression_analysis(
+    def test_runs_default_accuracy_analysis(
         self,
         mock_registry: Mock,
         tmp_path: Path,
@@ -44,7 +44,7 @@ class TestAnalyzeCommand:
         result = runner.invoke(analyze, [str(data_dir)])
 
         assert result.exit_code == 0
-        mock_registry.create.assert_called_once_with("regression")
+        mock_registry.create.assert_called_once_with("accuracy")
         mock_analysis.run.assert_called_once()
 
     @patch("ipw.cli.analyze.AnalysisRegistry")
@@ -197,6 +197,45 @@ class TestAnalyzeCommand:
         assert "Summary:" in result.output
         assert "total_samples: 42" in result.output
         assert "key: value" in result.output
+
+    @patch("ipw.cli.analyze.AnalysisRegistry")
+    def test_eval_flags_propagate_to_context(
+        self,
+        mock_registry: Mock,
+        tmp_path: Path,
+    ) -> None:
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+
+        mock_analysis = Mock()
+        mock_analysis.run.return_value = AnalysisResult(
+            analysis="accuracy",
+            summary={},
+            data={},
+            warnings=(),
+            artifacts={},
+        )
+        mock_registry.create.return_value = mock_analysis
+
+        runner = CliRunner()
+        result = runner.invoke(
+            analyze,
+            [
+                str(data_dir),
+                "--eval-client",
+                "judge",
+                "--eval-base-url",
+                "http://judge.local",
+                "--eval-model",
+                "judge-model",
+            ],
+        )
+
+        assert result.exit_code == 0
+        context = mock_analysis.run.call_args[0][0]
+        assert context.options["eval_client"] == "judge"
+        assert context.options["eval_base_url"] == "http://judge.local"
+        assert context.options["eval_model"] == "judge-model"
 
     @patch("ipw.cli.analyze.AnalysisRegistry")
     def test_displays_warnings(

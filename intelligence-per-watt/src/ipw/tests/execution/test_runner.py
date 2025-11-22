@@ -164,7 +164,7 @@ class TestProfilerRunner:
 
         summary = json.loads(summary_path.read_text())
         assert summary["profiler_config"]["model"] == "test-model"
-        assert summary["profiler_config"]["run_metadata"] == {}
+        assert "versions" in summary
 
     @patch("ipw.execution.runner.DatasetRegistry")
     @patch("ipw.execution.runner.ClientRegistry")
@@ -476,6 +476,38 @@ class TestProfilerRunner:
         metrics = result.model_metrics["test-model"]
         assert metrics.latency_metrics.throughput_tokens_per_sec == 10.0
         assert metrics.latency_metrics.per_token_ms == 100.0
+
+    @patch.object(ProfilerRunner, "_process_records", autospec=True, side_effect=RuntimeError("boom"))
+    @patch.object(ProfilerRunner, "_ensure_client_ready")
+    @patch("ipw.execution.runner.TelemetrySession")
+    @patch("ipw.execution.runner.EnergyMonitorCollector")
+    def test_run_closes_client_on_error(
+        self,
+        mock_collector: Mock,
+        mock_session: Mock,
+        _mock_ensure_ready: Mock,
+        _mock_process_records: Mock,
+    ) -> None:
+        config = ProfilerConfig(
+            model="test-model",
+            client_id="test",
+            dataset_id="test",
+        )
+        runner = ProfilerRunner(config)
+        client = Mock()
+        client.close = Mock()
+        dataset = Mock()
+
+        mock_session.return_value.__enter__.return_value = Mock()
+        mock_collector.return_value = Mock()
+
+        with patch.object(runner, "_resolve_dataset", return_value=dataset), patch.object(
+            runner, "_resolve_client", return_value=client
+        ):
+            with pytest.raises(RuntimeError):
+                runner.run()
+
+        client.close.assert_called_once()
 
     def test_get_output_path_includes_hardware_and_model(self, tmp_path: Path) -> None:
         config = ProfilerConfig(

@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import json
+import os
 from importlib import resources
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, MutableMapping
+from typing import (Any, Dict, Iterable, Iterator, MutableMapping, Optional,
+                    Tuple)
 
+import ipw.evaluation  # noqa: F401  # register evaluation handlers
 from datasets import load_from_disk
 
-from ...core.registry import DatasetRegistry
+from ...clients.base import InferenceClient
+from ...core.registry import (ClientRegistry, DatasetRegistry,
+                              EvaluationRegistry)
 from ...core.types import DatasetRecord
 from ..base import DatasetProvider
 
 _DEFAULT_DATASET_DIR = "mixed_1k_seed1_base"
+_DEFAULT_JUDGE_MODEL = "gpt-5-nano-2025-08-07"
+_DEFAULT_JUDGE_BASE_URL = "https://api.openai.com/v1"
 
 
 def _default_dataset_path() -> Path:
@@ -92,6 +99,70 @@ class IPWDataset(DatasetProvider):
 
     def size(self) -> int:
         return len(self._records)
+
+    def verify_requirements(self) -> list[str]:
+        issues: list[str] = []
+        if not (os.getenv("IPW_EVAL_API_KEY") or os.getenv("OPENAI_API_KEY")):
+            issues.append(
+                "Missing evaluation API key. Set IPW_EVAL_API_KEY (preferred) or OPENAI_API_KEY for scoring."
+            )
+        return issues
+
+    def score(
+        self,
+        record: DatasetRecord,
+        response: str,
+        *,
+        eval_client: Optional[InferenceClient] = None,
+    ) -> Tuple[Optional[bool], Dict[str, object]]:
+        """
+        Delegate scoring to a dataset-specific evaluation handler based on the
+        embedded metadata in this mixed dataset.
+        """
+        raw_meta = record.dataset_metadata.get("dataset_metadata")
+        if not isinstance(raw_meta, str):
+            raise RuntimeError("Missing or invalid 'dataset_metadata' field for scoring.")
+
+        meta = json.loads(raw_meta)
+        config = meta.get("config") or {}
+        
+        # Use a mapping from dataset_name to evaluation_method (handler key)
+        dataset_name = config.get("dataset_name")
+        
+        # Define the mapping
+        VERIFICATION_MAPPING = {
+            "allenai/WildChat": "wildchat",
+            "facebook/natural_reasoning": "natural_reasoning",
+            "lmsys/lmsys-chat-1m": "wildchat",
+        }
+
+        evaluation_method = VERIFICATION_MAPPING.get(dataset_name)
+
+        if not evaluation_method:
+            raise RuntimeError(
+                f"Could not determine evaluation method for dataset: {dataset_name}. "
+                f"Supported datasets: {', '.join(sorted(VERIFICATION_MAPPING.keys()))}"
+            )
+
+        # Instantiate the judge client (default: OpenAI-compatible/OpenRouter)
+        judge_client = eval_client or ClientRegistry.create(
+            "openai",
+            base_url=_DEFAULT_JUDGE_BASE_URL,
+            model=_DEFAULT_JUDGE_MODEL,
+        )
+
+        handler = EvaluationRegistry.create(evaluation_method, client=judge_client)
+
+        problem = record.problem
+        reference = record.answer
+
+        is_correct, eval_meta = handler.evaluate(
+            problem=problem,
+            reference=reference,
+            model_answer=response,
+            metadata=meta,
+        )
+        return is_correct, eval_meta
 
 
 __all__ = ["IPWDataset"]

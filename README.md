@@ -55,7 +55,7 @@ ipw plot ./runs/profile_*
 
 ### `ipw profile`
 
-Sends prompts to your service and measures performance.
+Send prompts to the device, profile hardware usage, and calculate IPW/IPJ.
 
 ```bash
 ipw profile --client <client> --model <model> [options]
@@ -64,9 +64,12 @@ ipw profile --client <client> --model <model> [options]
 **Options:**
 - `--client` - Inference client (e.g., `ollama`, `vllm`)
 - `--model` - Model name
-- `--client-base-url` - Service URL (e.g., `http://localhost:11434`)
-- `--dataset` - Workload dataset (default: `ipw`)
+- `--client-base-url` - Client base URL
+- `--eval-client` - Judge client for scoring (default: `openai`)
+- `--eval-base-url` - Judge service URL (default: `https://api.openai.com/v1`)
+- `--eval-model` - Judge model (default: `gpt-5-nano-2025-08-07`)
 - `--max-queries` - Limit queries for testing
+- `--dataset` - Workload dataset (default: `ipw`)
 - `--output-dir` - Where to save results
 
 Example:
@@ -80,10 +83,12 @@ ipw profile \
 
 ### `ipw analyze`
 
-Compute regression metrics (e.g., how energy scales with tokens, latency vs. input size).
+By default, `ipw analyze` calculates IPW and IPJ for a dataset. summary stats. To see energy, power, and latency vs. intput/output length, use `--analysis regression`.
 
 ```bash
 ipw analyze <results_dir>
+# or explicitly choose a different analysis
+# ipw analyze <results_dir> --analysis regression
 ```
 
 ### `ipw plot`

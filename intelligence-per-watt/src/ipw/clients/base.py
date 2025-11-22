@@ -44,5 +44,22 @@ class InferenceClient(ABC):
         """Optional hook to perform warmup before serving requests."""
         return None
 
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> str:
+        """
+        Synchronous chat completion helper.
+
+        Implementations should return the generated text for the given prompts.
+        Subclasses that don't support chat may rely on this default, which
+        raises to signal the capability is unavailable.
+        """
+        raise NotImplementedError
+
 
 __all__ = ["InferenceClient"]

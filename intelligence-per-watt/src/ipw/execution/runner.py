@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+from importlib import metadata as importlib_metadata
 import json
 import math
+import platform
 import shutil
 import statistics
 import time
@@ -11,34 +14,23 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping, MutableMapping, Optional, Sequence
 
+import click
 from datasets import Dataset
 from tqdm.auto import tqdm
 
 from ..clients.base import InferenceClient
 from ..core.registry import ClientRegistry, DatasetRegistry
-from ..core.types import (
-    DatasetRecord,
-    GpuInfo,
-    ProfilerConfig,
-    Response,
-    SystemInfo,
-    TelemetryReading,
-)
+from ..core.types import (DatasetRecord, GpuInfo, ProfilerConfig, Response,
+                          SystemInfo, TelemetryReading)
 from ..telemetry import EnergyMonitorCollector
 from .hardware import derive_hardware_label
 from .telemetry_session import TelemetrySample, TelemetrySession
-from .types import (
-    ComputeMetrics,
-    EnergyMetrics,
-    LatencyMetrics,
-    MemoryMetrics,
-    MetricStats,
-    ModelMetrics,
-    PowerComponentMetrics,
-    PowerMetrics,
-    ProfilingRecord,
-    TokenMetrics,
-)
+from .types import (ComputeMetrics, EnergyMetrics, LatencyMetrics,
+                    MemoryMetrics, MetricStats, ModelMetrics,
+                    PowerComponentMetrics, PowerMetrics, ProfilingRecord,
+                    TokenMetrics)
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ProfilerRunner:
@@ -77,36 +69,33 @@ class ProfilerRunner:
         self._gpu_info: Optional[GpuInfo] = None
         self._baseline_energy: Optional[float] = None
         self._last_energy_total: Optional[float] = None
+        self._overwrite_confirmed: bool = False
 
     def run(self) -> None:
         dataset = self._resolve_dataset(
             self._config.dataset_id, self._config.dataset_params
         )
-        client = self._resolve_client(
-            self._config.client_id,
-            self._config.client_base_url,
-            self._config.client_params,
-        )
-
+        client: InferenceClient | None = None
         collector = EnergyMonitorCollector()
 
-        self._ensure_client_ready(client)
-
         try:
+            client = self._resolve_client(
+                self._config.client_id,
+                self._config.client_base_url,
+                self._config.client_params,
+            )
+
+            self._ensure_client_ready(client)
+
             with TelemetrySession(collector) as telemetry:
                 self._process_records(dataset, client, telemetry)
+
+            if not self._records:
+                return
+
+            self._persist_records(dataset)
         finally:
-            close_client = getattr(client, "close", None)
-            if callable(close_client):
-                try:
-                    close_client()
-                except Exception:
-                    pass
-
-        if not self._records:
-            return
-
-        self._persist_records(dataset)
+            self._close_client(client)
 
     def _process_records(
         self,
@@ -212,7 +201,6 @@ class ProfilerRunner:
             ),
             gpu_info=self._gpu_info,
             system_info=self._system_info,
-            lm_correctness=False,
             lm_response=response.content,
         )
 
@@ -255,23 +243,20 @@ class ProfilerRunner:
         ):
             return EnergyMetrics()
 
-        per_query_delta = end_value - start_value
-        per_query = per_query_delta if per_query_delta >= 0 else None
+        # Check for counter reset within the query window
+        if end_value < start_value:
+            return EnergyMetrics()
 
-        reset_in_window = per_query_delta < 0
-        reset_between_queries = (
-            not reset_in_window
-            and self._last_energy_total is not None
-            and end_value < self._last_energy_total
-        )
+        per_query = end_value - start_value
 
-        if reset_in_window:
-            # Counter rolled backwards while we were sampling – drop this reading
-            # and anchor future totals to the post-reset value.
-            self._baseline_energy = end_value
-        elif self._baseline_energy is None or reset_between_queries:
-            # Either the first reading we've seen or a reset that occurred while
-            # the system was idle between queries.
+        if self._baseline_energy is None:
+            self._baseline_energy = start_value
+
+        # If the counter reset between queries (current start < last end), rebase baseline
+        if (
+            self._last_energy_total is not None
+            and start_value < self._last_energy_total
+        ):
             self._baseline_energy = start_value
 
         self._last_energy_total = end_value
@@ -308,12 +293,6 @@ class ProfilerRunner:
         self._hardware_label = hardware_label
         self._output_path = output_path
         return output_path
-
-    def _compute_total_energy(self) -> Optional[float]:
-        if self._baseline_energy is None or self._last_energy_total is None:
-            return None
-        total = self._last_energy_total - self._baseline_energy
-        return total if total >= 0 else None
 
     def _invoke_client(self, client, record: DatasetRecord) -> Response:
         payload: MutableMapping[str, object] = dict(self._config.additional_parameters)
@@ -359,12 +338,23 @@ class ProfilerRunner:
             )
         client.prepare(self._config.model)
 
+    def _close_client(self, client: InferenceClient | None) -> None:
+        if client is None:
+            return
+        close_fn = getattr(client, "close", None)
+        if callable(close_fn):
+            try:
+                close_fn()
+            except Exception:
+                LOGGER.warning("Failed to close inference client cleanly", exc_info=True)
+
     def _persist_records(self, dataset) -> None:
         if not self._records:
             return
 
         output_path = self._get_output_path()
         if output_path.exists():
+            self._confirm_overwrite(output_path)
             shutil.rmtree(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -374,6 +364,7 @@ class ProfilerRunner:
 
         summary = {
             "model": self._config.model,
+            "profiler_config": _jsonify(asdict(self._config)),
             "dataset": getattr(dataset, "dataset_id", self._config.dataset_id),
             "dataset_name": getattr(dataset, "dataset_name", None),
             "hardware_label": self._hardware_label,
@@ -382,10 +373,27 @@ class ProfilerRunner:
             "system_info": asdict(self._system_info) if self._system_info else None,
             "gpu_info": asdict(self._gpu_info) if self._gpu_info else None,
             "output_dir": str(output_path),
-            "profiler_config": _jsonify(asdict(self._config)),
+            "versions": _get_versions(),
         }
         summary_path = output_path / "summary.json"
-        summary_path.write_text(json.dumps(summary, indent=2))
+        summary_path.write_text(json.dumps(summary, indent=2, default=str))
+
+    def _confirm_overwrite(self, output_path: Path) -> None:
+        """Prompt before overwriting an existing output directory."""
+        if self._overwrite_confirmed:
+            return
+
+        prompt = (
+            f"Output directory already exists at {output_path}. "
+            "Overwrite it? This will remove existing run data."
+        )
+        proceed = click.confirm(prompt, default=False)
+
+        if not proceed:
+            raise RuntimeError(
+                f"Profiling aborted to avoid overwriting existing output at {output_path}."
+            )
+        self._overwrite_confirmed = True
 
 
 def _stat_summary(values: Iterable[Optional[float]]) -> MetricStats:
@@ -414,3 +422,15 @@ def _jsonify(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [_jsonify(item) for item in value]
     return value
+
+
+def _get_versions() -> dict[str, str]:
+    try:
+        ipw_version = importlib_metadata.version("ipw")
+    except importlib_metadata.PackageNotFoundError:
+        ipw_version = "unknown"
+
+    return {
+        "ipw": ipw_version,
+        "python": platform.python_version(),
+    }

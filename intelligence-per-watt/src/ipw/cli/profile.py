@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-from importlib import metadata as importlib_metadata
-import platform
-import shlex
-import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Dict
 
 import click
 from ipw.core.types import ProfilerConfig
 
-from ._console import success
+from ._console import _print_result, info, success, warning
 
 
 def _collect_params(ctx, param, values):
@@ -29,31 +25,29 @@ def _collect_params(ctx, param, values):
     return collected
 
 
-def _build_run_metadata() -> Dict[str, Any]:
-    """Capture CLI invocation details and local version information."""
-
-    try:
-        ipw_version = importlib_metadata.version("ipw")
-    except importlib_metadata.PackageNotFoundError:
-        ipw_version = "unknown"
-
-    return {
-        "cli_invocation": {
-            "argv": list(sys.argv),
-            "command": " ".join(shlex.quote(arg) for arg in sys.argv),
-        },
-        "versions": {
-            "ipw": ipw_version,
-            "python": platform.python_version(),
-        },
-    }
-
-
 @click.command(help="Run profiling against an inference client.")
 @click.option("--client", "client_id", required=True, help="Client identifier")
 @click.option("--model", required=True, help="Model name to invoke")
 @click.option("--dataset", "dataset_id", default="ipw", help="Dataset identifier")
 @click.option("--client-base-url", help="Client base URL")
+@click.option(
+    "--eval-client",
+    help="Evaluation client identifier (judge)",
+    default="openai",
+    show_default=True,
+)
+@click.option(
+    "--eval-base-url",
+    help="Evaluation client base URL",
+    default="https://api.openai.com/v1",
+    show_default=True,
+)
+@click.option(
+    "--eval-model",
+    help="Evaluation model to use for scoring",
+    default="gpt-5-nano-2025-08-07",
+    show_default=True,
+)
 @click.option(
     "--dataset-param",
     multiple=True,
@@ -77,8 +71,12 @@ def profile(
     client_param,
     output_dir: str | None,
     max_queries: int | None,
+    eval_client: str | None,
+    eval_base_url: str | None,
+    eval_model: str | None,
 ) -> None:
     """Execute profiling run with the execution pipeline."""
+    import ipw.analysis
     import ipw.clients
     import ipw.datasets
 
@@ -90,6 +88,10 @@ def profile(
         )
 
     ipw.datasets.ensure_registered()
+    ipw.analysis.ensure_registered()
+    
+    from ipw.analysis.base import AnalysisContext
+    from ipw.core.registry import AnalysisRegistry, DatasetRegistry
     from ipw.execution import ProfilerRunner  # Deferred import for heavy dependencies
 
     config = ProfilerConfig(
@@ -101,12 +103,43 @@ def profile(
         model=model,
         max_queries=max_queries,
         output_dir=Path(output_dir) if output_dir else None,
-        run_metadata=_build_run_metadata(),
     )
+
+    # Preflight: dataset requirements (api keys, etc)
+    try:
+        dataset_cls = DatasetRegistry.get(dataset_id)
+        dataset_instance = dataset_cls(**dataset_param)
+        issues = dataset_instance.verify_requirements()
+        if issues:
+            raise click.ClickException(
+                "Dataset requirements not satisfied:\n- " + "\n- ".join(issues)
+            )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
 
     runner = ProfilerRunner(config)
     runner.run()
     success("Profiling run completed")
+    
+    # Post-run analysis
+    results_dir = runner._output_path
+    if results_dir and results_dir.exists():
+        info("Running post-profile analysis...")
+        context = AnalysisContext(
+            results_dir=results_dir,
+            options={
+                "model": model,
+                "eval_client": eval_client,
+                "eval_base_url": eval_base_url,
+                "eval_model": eval_model,
+            },
+        )
+        try:
+            analysis = AnalysisRegistry.create("accuracy")
+            result = analysis.run(context)
+            _print_result(result, verbose=False)
+        except Exception as e:
+            warning(f"Warning: Analysis failed: {e}")
 
 
 __all__ = ["profile"]
