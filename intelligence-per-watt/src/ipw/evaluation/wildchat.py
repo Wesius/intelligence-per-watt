@@ -93,16 +93,18 @@ Return **only** a JSON object that matches the provided schema:
         result2 = self._verdict_to_bool(verdict2, generated_is_a=False)
 
         if result1 is None or result2 is None:
-            final_result = False
+            meta = {
+                "generated_as_a": {"verdict": verdict1, "response": response1},
+                "generated_as_b": {"verdict": verdict2, "response": response2},
+            }
+            return None, meta
         else:
             final_result = result1 or result2
-
-        meta = {
-            "generated_as_a": {"verdict": verdict1, "response": response1},
-            "generated_as_b": {"verdict": verdict2, "response": response2},
-        }
-        return final_result, meta
-
+            meta = {
+                "generated_as_a": {"verdict": verdict1, "response": response1},
+                "generated_as_b": {"verdict": verdict2, "response": response2},
+            }
+            return final_result, meta
     def _get_judge_verdict(
         self, problem: str, response_a: str, response_b: str
     ) -> Tuple[Optional[str], Optional[str]]:
