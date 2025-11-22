@@ -81,7 +81,7 @@ class NaturalReasoningHandler(EvaluationHandler):
             system_prompt="",
             user_prompt=prompt,
             temperature=0.0,
-            max_output_tokens=10,
+            max_output_tokens=32,
         )
 
         # Match 'true' / 'false' as the entire response, case-insensitive, allowing for whitespace.
