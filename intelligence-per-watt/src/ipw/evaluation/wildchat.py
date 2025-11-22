@@ -127,7 +127,7 @@ Return **only** a JSON object that matches the provided schema:
         )
         content = raw.strip()
 
-        verdict_match = re.search(r"\[+([AB<>=]+)\]+", content)
+        verdict_match = re.search(r"\[\[([AB][><=]{1,2}[AB])\]\]", content)
         if verdict_match:
             return verdict_match.group(1), content
 
