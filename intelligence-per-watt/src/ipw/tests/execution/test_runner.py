@@ -164,7 +164,7 @@ class TestProfilerRunner:
 
         summary = json.loads(summary_path.read_text())
         assert summary["profiler_config"]["model"] == "test-model"
-        assert summary["profiler_config"]["run_metadata"] == {}
+        assert "versions" in summary
 
     @patch("ipw.execution.runner.DatasetRegistry")
     @patch("ipw.execution.runner.ClientRegistry")

@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import platform
-import shlex
-import sys
-from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Dict
+from typing import Dict
 
 import click
 from ipw.core.types import ProfilerConfig
@@ -27,26 +23,6 @@ def _collect_params(ctx, param, values):
                 continue
             collected[key] = raw.strip()
     return collected
-
-
-def _build_run_metadata() -> Dict[str, Any]:
-    """Capture CLI invocation details and local version information."""
-
-    try:
-        ipw_version = importlib_metadata.version("ipw")
-    except importlib_metadata.PackageNotFoundError:
-        ipw_version = "unknown"
-
-    return {
-        "cli_invocation": {
-            "argv": list(sys.argv),
-            "command": " ".join(shlex.quote(arg) for arg in sys.argv),
-        },
-        "versions": {
-            "ipw": ipw_version,
-            "python": platform.python_version(),
-        },
-    }
 
 
 @click.command(help="Run profiling against an inference client.")
@@ -107,7 +83,6 @@ def profile(
         model=model,
         max_queries=max_queries,
         output_dir=Path(output_dir) if output_dir else None,
-        run_metadata=_build_run_metadata(),
     )
 
     # Preflight: dataset requirements
