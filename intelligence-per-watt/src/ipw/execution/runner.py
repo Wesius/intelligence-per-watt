@@ -102,7 +102,7 @@ class ProfilerRunner:
                 response = self._invoke_client(client, record)
                 end = time.time()
                 samples = list(telemetry.window(start, end))
-                built = self._build_record(index, record, response, samples, start, end, dataset)
+                built = self._build_record(index, record, response, samples, start, end)
                 if built is not None:
                     self._records.append(built)
                     if len(self._records) % self._FLUSH_INTERVAL == 0:
@@ -117,7 +117,6 @@ class ProfilerRunner:
         samples: Sequence[TelemetrySample],
         start_time: float,
         end_time: float,
-        dataset=None,
     ) -> Optional[ProfilingRecord]:
         self._update_hardware_metadata(samples)
         telemetry_readings = [sample.reading for sample in samples]

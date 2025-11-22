@@ -44,6 +44,7 @@ class InferenceClient(ABC):
         """Optional hook to perform warmup before serving requests."""
         return None
 
+    @abstractmethod
     def chat(
         self,
         system_prompt: str,
@@ -54,17 +55,10 @@ class InferenceClient(ABC):
     ) -> str:
         """
         Synchronous chat completion helper.
-        
-        Default implementation wraps `stream_chat_completion`.
+
+        Implementations should return the generated text for the given prompts.
         """
-        prompt = f"{system_prompt}\n\n{user_prompt}" if system_prompt else user_prompt
-        response = self.stream_chat_completion(
-            model="default", # Should be overridden or ignored by stream_chat_completion if not strict
-            prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_output_tokens
-        )
-        return response.content
+        raise NotImplementedError
 
 
 __all__ = ["InferenceClient"]
