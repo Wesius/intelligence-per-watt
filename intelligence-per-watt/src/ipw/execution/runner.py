@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from importlib import metadata as importlib_metadata
 import json
 import math
+import platform
 import shutil
 import statistics
 import time
@@ -309,12 +311,6 @@ class ProfilerRunner:
         self._output_path = output_path
         return output_path
 
-    def _compute_total_energy(self) -> Optional[float]:
-        if self._baseline_energy is None or self._last_energy_total is None:
-            return None
-        total = self._last_energy_total - self._baseline_energy
-        return total if total >= 0 else None
-
     def _invoke_client(self, client, record: DatasetRecord) -> Response:
         payload: MutableMapping[str, object] = dict(self._config.additional_parameters)
         return client.stream_chat_completion(
@@ -374,6 +370,7 @@ class ProfilerRunner:
 
         summary = {
             "model": self._config.model,
+            "profiler_config": _jsonify(asdict(self._config)),
             "dataset": getattr(dataset, "dataset_id", self._config.dataset_id),
             "dataset_name": getattr(dataset, "dataset_name", None),
             "hardware_label": self._hardware_label,
@@ -382,7 +379,7 @@ class ProfilerRunner:
             "system_info": asdict(self._system_info) if self._system_info else None,
             "gpu_info": asdict(self._gpu_info) if self._gpu_info else None,
             "output_dir": str(output_path),
-            "profiler_config": _jsonify(asdict(self._config)),
+            "versions": _get_versions(),
         }
         summary_path = output_path / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2))
@@ -414,3 +411,15 @@ def _jsonify(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         return [_jsonify(item) for item in value]
     return value
+
+
+def _get_versions() -> dict[str, str]:
+    try:
+        ipw_version = importlib_metadata.version("ipw")
+    except importlib_metadata.PackageNotFoundError:
+        ipw_version = "unknown"
+
+    return {
+        "ipw": ipw_version,
+        "python": platform.python_version(),
+    }
