@@ -10,6 +10,7 @@ def ensure_registered() -> None:
     """Import built-in dataset providers to populate the registry."""
     from . import (  # noqa: F401
         ipw,
+        ipw_pro,
         mmlu_pro,
         supergpqa,
     )

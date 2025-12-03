@@ -12,7 +12,7 @@ import statistics
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Iterable, Mapping, MutableMapping, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional, Sequence
 
 import click
 from datasets import Dataset
@@ -20,15 +20,22 @@ from tqdm.auto import tqdm
 
 from ..clients.base import InferenceClient
 from ..core.registry import ClientRegistry, DatasetRegistry
-from ..core.types import (DatasetRecord, GpuInfo, ProfilerConfig, Response,
-                          SystemInfo, TelemetryReading)
+from ..core.types import DatasetRecord, GpuInfo, ProfilerConfig, Response, SystemInfo, TelemetryReading
 from ..telemetry import EnergyMonitorCollector
 from .hardware import derive_hardware_label
 from .telemetry_session import TelemetrySample, TelemetrySession
-from .types import (ComputeMetrics, EnergyMetrics, LatencyMetrics,
-                    MemoryMetrics, MetricStats, ModelMetrics,
-                    PowerComponentMetrics, PowerMetrics, ProfilingRecord,
-                    TokenMetrics)
+from .types import (
+    ComputeMetrics,
+    EnergyMetrics,
+    LatencyMetrics,
+    MemoryMetrics,
+    MetricStats,
+    ModelMetrics,
+    PowerComponentMetrics,
+    PowerMetrics,
+    ProfilingRecord,
+    TokenMetrics,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,40 +43,17 @@ LOGGER = logging.getLogger(__name__)
 class ProfilerRunner:
     """Coordinate dataset iteration, inference calls, telemetry capture, and persistence."""
 
-    _FLUSH_INTERVAL = 100
-
-    # The runner is intentionally a slim orchestrator, but it still handles a
-    # fair amount of coordination work:
-    #
-    # 1. Resolve dataset / client implementations from the registries so that we
-    #    only depend on the registry surface, not the old resolution helpers.
-    # 2. Spin up the `TelemetrySession`, which hides the threaded sampling loop
-    #    that continuously pulls energy/power/memory readings into a rolling
-    #    buffer while the run executes.
-    # 3. For each dataset record, send the request to the client, collect the
-    #    telemetry samples that overlap the query window, and transform the raw
-    #    response + telemetry into the strongly typed `ProfilingRecord` payload
-    #    defined in `ipw.execution.types`.
-    # 4. Accumulate all records in-memory and write a HuggingFace dataset to the
-    #    configured output directory once the run completes, along with a
-    #    `summary.json` containing run metadata and aggregate energy totals.
-    #
-    # The actual measurements and conversions stay localized to helper methods
-    # (`_compute_energy_metrics`, `_stat_summary`, etc.) so that the control flow
-    # remains readable. Any future refactor (e.g., streaming writes or different
-    # telemetry aggregation) should only need to touch the helpers and the final
-    # persistence step.
-
     def __init__(self, config: ProfilerConfig) -> None:
         self._config = config
-        self._records: list[ProfilingRecord] = []
+        self._records: Dict[int, ProfilingRecord] = {}
         self._output_path: Optional[Path] = None
+        self._output_path_hardware_label: Optional[str] = None
+        self._output_dataset_label: Optional[str] = None
         self._hardware_label: Optional[str] = None
         self._system_info: Optional[SystemInfo] = None
         self._gpu_info: Optional[GpuInfo] = None
-        self._baseline_energy: Optional[float] = None
-        self._last_energy_total: Optional[float] = None
-        self._overwrite_confirmed: bool = False
+        self._all_samples: list[TelemetrySample] = []
+        self._request_timings: Dict[int, tuple[float | None, float | None]] = {}
 
     def run(self) -> None:
         dataset = self._resolve_dataset(
@@ -87,7 +71,7 @@ class ProfilerRunner:
 
             self._ensure_client_ready(client)
 
-            with TelemetrySession(collector) as telemetry:
+            with TelemetrySession(collector, buffer_seconds=3600.0) as telemetry:
                 self._process_records(dataset, client, telemetry)
 
             if not self._records:
@@ -103,22 +87,84 @@ class ProfilerRunner:
         client,
         telemetry: TelemetrySession,
     ) -> None:
-        total_queries = self._config.max_queries or dataset.size()
-        iterator = enumerate(dataset)
-        with tqdm(total=total_queries, desc="Profiling", unit="query") as progress:
-            for index, record in iterator:
-                if index >= total_queries:
-                    break
-                start = time.time()
-                response = self._invoke_client(client, record)
-                end = time.time()
-                samples = list(telemetry.window(start, end))
-                built = self._build_record(index, record, response, samples, start, end)
+        dataset_size = dataset.size()
+        if dataset_size <= 0:
+            return
+
+        target_queries = (
+            self._config.max_queries
+            if self._config.max_queries is not None
+            else dataset_size
+        )
+        total_queries = min(target_queries, dataset_size)
+        if total_queries <= 0:
+            return
+
+        if self._config.max_concurrency == 0:
+            max_concurrency = total_queries
+        else:
+            max_concurrency = max(int(self._config.max_concurrency or 1), 1)
+            
+        pending_records: Dict[int, DatasetRecord] = {}
+        prompt_iter = self._prompt_iterator(dataset, total_queries, pending_records)
+        payload: MutableMapping[str, object] = dict(self._config.additional_parameters)
+        completed = sum(1 for idx in self._records if idx < total_queries)
+
+        with tqdm(
+            total=total_queries,
+            desc="Profiling",
+            unit="query",
+            initial=completed,
+        ) as progress:
+            for index, response in client.run_concurrent(
+                self._config.model,
+                prompt_iter,
+                max_concurrency,
+                **payload,
+            ):
+                current_readings = telemetry.readings()
+                last_ts = self._all_samples[-1].timestamp if self._all_samples else -1.0
+                for sample in current_readings:
+                    if sample.timestamp > last_ts:
+                        self._all_samples.append(sample)
+
+                record = pending_records.pop(index, None)
+                if record is None:
+                    continue
+
+                wall_time_now = time.time()
+                start_time = response.request_start_time or wall_time_now
+                end_time = response.request_end_time or start_time
+                if end_time < start_time:
+                    end_time = start_time
+
+                self._request_timings[index] = (start_time, end_time)
+
+                samples = list(telemetry.window(start_time, end_time))
+
+                built = self._build_record(
+                    index, record, response, samples, start_time, end_time
+                )
                 if built is not None:
-                    self._records.append(built)
-                    if len(self._records) % self._FLUSH_INTERVAL == 0:
-                        self._persist_records(dataset)
+                    self._records[index] = built
                 progress.update(1)
+
+        self._recompute_metrics()
+
+
+    def _prompt_iterator(
+        self,
+        dataset,
+        total_queries: int,
+        pending_records: Dict[int, DatasetRecord],
+    ) -> Iterator[tuple[int, str]]:
+        for index, record in enumerate(dataset):
+            if index >= total_queries:
+                break
+            if index in self._records:
+                continue
+            pending_records[index] = record
+            yield index, record.problem
 
     def _build_record(
         self,
@@ -133,9 +179,8 @@ class ProfilerRunner:
         telemetry_readings = [sample.reading for sample in samples]
 
         energy_metrics = self._compute_energy_metrics(telemetry_readings)
-        power_stats = _stat_summary(
-            [reading.power_watts for reading in telemetry_readings]
-        )
+        power_metrics = PowerMetrics()
+
         temperature_stats = _stat_summary(
             [reading.temperature_celsius for reading in telemetry_readings]
         )
@@ -149,7 +194,6 @@ class ProfilerRunner:
         usage = response.usage
         total_seconds = max(end_time - start_time, 0.0)
 
-        # Defensive: ensure token counts are valid integers
         prompt_tokens = usage.prompt_tokens if usage.prompt_tokens is not None else 0
         completion_tokens = (
             usage.completion_tokens if usage.completion_tokens is not None else 0
@@ -182,17 +226,7 @@ class ProfilerRunner:
                 cpu_mb=cpu_memory_stats,
                 gpu_mb=gpu_memory_stats,
             ),
-            power_metrics=PowerMetrics(
-                gpu=PowerComponentMetrics(
-                    per_query_watts=power_stats,
-                    total_watts=MetricStats(
-                        avg=power_stats.avg,
-                        max=power_stats.max,
-                        median=power_stats.median,
-                        min=power_stats.min,
-                    ),
-                )
-            ),
+            power_metrics=power_metrics,
             temperature_metrics=temperature_stats,
             token_metrics=TokenMetrics(
                 input=prompt_tokens,
@@ -205,8 +239,11 @@ class ProfilerRunner:
         )
 
         record_payload = ProfilingRecord(
+            dataset_index=index,
             problem=record.problem,
             answer=record.answer,
+            request_start_time=start_time,
+            request_end_time=end_time,
             dataset_metadata=dict(record.dataset_metadata),
             subject=record.subject,
             model_answers={model_name: response.content},
@@ -218,11 +255,7 @@ class ProfilerRunner:
     def _compute_energy_metrics(
         self, readings: Sequence[TelemetryReading]
     ) -> EnergyMetrics:
-        """Compute energy metrics from telemetry readings.
-
-        Energy values should be monotonically increasing cumulative counters.
-        Negative deltas indicate counter reset or data anomaly and are treated as None.
-        """
+        """Compute energy metrics from telemetry readings."""
         energy_values = [
             reading.energy_joules
             for reading in readings
@@ -234,7 +267,6 @@ class ProfilerRunner:
         start_value = energy_values[0]
         end_value = energy_values[-1]
 
-        # Validate energy values are finite and non-negative
         if not (
             math.isfinite(start_value)
             and math.isfinite(end_value)
@@ -243,23 +275,10 @@ class ProfilerRunner:
         ):
             return EnergyMetrics()
 
-        # Check for counter reset within the query window
         if end_value < start_value:
             return EnergyMetrics()
 
         per_query = end_value - start_value
-
-        if self._baseline_energy is None:
-            self._baseline_energy = start_value
-
-        # If the counter reset between queries (current start < last end), rebase baseline
-        if (
-            self._last_energy_total is not None
-            and start_value < self._last_energy_total
-        ):
-            self._baseline_energy = start_value
-
-        self._last_energy_total = end_value
 
         return EnergyMetrics(
             per_query_joules=per_query,
@@ -276,31 +295,41 @@ class ProfilerRunner:
 
         candidate = derive_hardware_label(self._system_info, self._gpu_info)
         if candidate and (self._hardware_label in (None, "UNKNOWN_HW")):
+            if candidate != self._hardware_label:
+                self._output_path = None
+                self._output_path_hardware_label = None
+                self._output_dataset_label = None
             self._hardware_label = candidate
 
     def _get_output_path(self, dataset_label: str | None = None) -> Path:
-        if self._output_path is not None:
-            return self._output_path
-
         hardware_label = self._hardware_label or "UNKNOWN_HW"
         model_slug = _slugify_model(self._config.model)
         dataset_segment = dataset_label or self._config.dataset_id or "dataset"
         dataset_segment = str(dataset_segment).strip() or "dataset"
+        concurrency_label = (
+            f"bs{self._config.max_concurrency}" if self._config.max_concurrency else "bs1"
+        )
         default_runs_dir = Path(__file__).resolve().parents[4] / "runs"
         base_dir = self._config.output_dir or default_runs_dir
-        profile_dir = f"profile_{hardware_label}_{model_slug}_{dataset_segment}".strip("_")
+        profile_dir = (
+            f"profile_{hardware_label}_{model_slug}_{dataset_segment}_{concurrency_label}"
+        ).strip("_")
 
         output_path = Path(base_dir) / profile_dir
 
-        self._hardware_label = hardware_label
-        self._output_path = output_path
-        return output_path
+        if (
+            self._output_path is None
+            or self._output_path_hardware_label != hardware_label
+            or self._output_dataset_label != dataset_segment
+        ):
+            self._output_path = output_path
+            self._output_path_hardware_label = hardware_label
+            self._output_dataset_label = dataset_segment
 
-    def _invoke_client(self, client, record: DatasetRecord) -> Response:
-        payload: MutableMapping[str, object] = dict(self._config.additional_parameters)
-        return client.stream_chat_completion(
-            self._config.model, record.problem, **payload
-        )
+        if self._hardware_label is None:
+            self._hardware_label = hardware_label
+
+        return self._output_path
 
     def _resolve_dataset(self, dataset_id: str, params: Mapping[str, Any]):
         try:
@@ -340,6 +369,105 @@ class ProfilerRunner:
             )
         client.prepare(self._config.model)
 
+    def _recompute_metrics(self) -> None:
+        if not self._all_samples:
+            LOGGER.warning("No telemetry samples collected; skipping metrics.")
+            return
+
+        samples = sorted(self._all_samples, key=lambda s: s.timestamp)
+        requests = []
+        for idx, (r_start, r_end) in self._request_timings.items():
+            if r_start is not None and r_end is not None:
+                requests.append((r_start, r_end, idx))
+        requests.sort(key=lambda x: x[0])
+
+        request_allocations: Dict[int, list[tuple[float, float, float, float]]] = {
+            idx: [] for idx in self._request_timings
+        }
+
+        active_requests = []
+        req_ptr = 0
+        num_reqs = len(requests)
+
+        for i in range(1, len(samples)):
+            s_prev, s_curr = samples[i - 1], samples[i]
+            t_mid = (s_prev.timestamp + s_curr.timestamp) / 2
+
+            # Add started requests
+            while req_ptr < num_reqs and requests[req_ptr][0] <= t_mid:
+                active_requests.append(requests[req_ptr])
+                req_ptr += 1
+
+            # Remove ended requests
+            active_requests = [r for r in active_requests if r[1] >= t_mid]
+
+            e_prev = s_prev.reading.energy_joules
+            e_curr = s_curr.reading.energy_joules
+            if e_prev is None or e_curr is None:
+                continue
+
+            delta_joules = max(0.0, e_curr - e_prev)
+            power_watts = s_curr.reading.power_watts or 0.0
+            concurrency = len(active_requests)
+
+            if concurrency > 0:
+                share_energy = delta_joules / concurrency
+                share_power = power_watts / concurrency
+                for _, _, idx in active_requests:
+                    request_allocations[idx].append(
+                        (share_power, share_energy, power_watts, delta_joules)
+                    )
+
+        model_name = self._config.model
+        for idx, allocations in request_allocations.items():
+            if idx not in self._records:
+                continue
+
+            record = self._records[idx]
+            if model_name not in record.model_metrics:
+                continue
+
+            if not allocations:
+                continue
+
+            shared_powers = [x[0] for x in allocations]
+            shared_energies = [x[1] for x in allocations]
+            raw_powers = [x[2] for x in allocations]
+            raw_energies = [x[3] for x in allocations]
+
+            total_shared_energy = sum(shared_energies)
+            total_raw_energy = sum(raw_energies)
+
+            shared_power_stats = _stat_summary(shared_powers)
+            raw_power_stats = _stat_summary(raw_powers)
+
+            metrics = record.model_metrics[model_name]
+            updated_power = PowerComponentMetrics(
+                per_query_watts=shared_power_stats,
+                total_watts=MetricStats(
+                    avg=raw_power_stats.avg,
+                    max=raw_power_stats.max,
+                    median=raw_power_stats.median,
+                    min=raw_power_stats.min,
+                ),
+            )
+            record.model_metrics[model_name] = ModelMetrics(
+                compute_metrics=metrics.compute_metrics,
+                energy_metrics=EnergyMetrics(
+                    per_query_joules=total_shared_energy,
+                    total_joules=total_raw_energy,
+                ),
+                latency_metrics=metrics.latency_metrics,
+                memory_metrics=metrics.memory_metrics,
+                power_metrics=PowerMetrics(gpu=updated_power),
+                temperature_metrics=metrics.temperature_metrics,
+                token_metrics=metrics.token_metrics,
+                gpu_info=metrics.gpu_info,
+                system_info=metrics.system_info,
+                lm_correctness=metrics.lm_correctness,
+                lm_response=metrics.lm_response,
+            )
+
     def _close_client(self, client: InferenceClient | None) -> None:
         if client is None:
             return
@@ -355,20 +483,24 @@ class ProfilerRunner:
             return
 
         dataset_label = (
-            getattr(dataset, "dataset_name", None)
-            or getattr(dataset, "dataset_id", None)
+            getattr(dataset, "dataset_id", None)
             or self._config.dataset_id
+            or getattr(dataset, "dataset_name", None)
         )
 
-        output_path = self._get_output_path(str(dataset_label).strip() or self._config.dataset_id)
+        output_path = self._get_output_path(
+            str(dataset_label).strip() or self._config.dataset_id
+        )
+        
         if output_path.exists():
-            self._confirm_overwrite(output_path)
+            LOGGER.warning("Output path %s exists. Overwriting.", output_path)
             shutil.rmtree(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        dataset_obj = Dataset.from_list([asdict(record) for record in self._records])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        ordered = [self._records[idx] for idx in sorted(self._records)]
+        dataset_obj = Dataset.from_list([asdict(record) for record in ordered])
         dataset_obj.save_to_disk(str(output_path))
-        output_path.mkdir(parents=True, exist_ok=True)
 
         summary = {
             "model": self._config.model,
@@ -385,23 +517,6 @@ class ProfilerRunner:
         }
         summary_path = output_path / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2, default=str))
-
-    def _confirm_overwrite(self, output_path: Path) -> None:
-        """Prompt before overwriting an existing output directory."""
-        if self._overwrite_confirmed:
-            return
-
-        prompt = (
-            f"Output directory already exists at {output_path}. "
-            "Overwrite it? This will remove existing run data."
-        )
-        proceed = click.confirm(prompt, default=False)
-
-        if not proceed:
-            raise RuntimeError(
-                f"Profiling aborted to avoid overwriting existing output at {output_path}."
-            )
-        self._overwrite_confirmed = True
 
 
 def _stat_summary(values: Iterable[Optional[float]]) -> MetricStats:

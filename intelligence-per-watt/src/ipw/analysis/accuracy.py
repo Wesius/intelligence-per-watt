@@ -388,15 +388,20 @@ class AccuracyAnalysis(AnalysisProvider):
                 LOGGER.warning(f"Dataset provider '{dataset_id}' does not support scoring.")
                 return dataset
 
-            if eval_client_id:
+            # If no client specified in options, fallback to provider defaults
+            target_client_id = eval_client_id or getattr(provider, "eval_client", None)
+            target_base_url = eval_base_url or getattr(provider, "eval_base_url", None)
+            target_model = eval_model or getattr(provider, "eval_model", None)
+
+            if target_client_id:
                 try:
                     eval_client = ClientRegistry.create(
-                        eval_client_id, eval_base_url, model=eval_model
+                        target_client_id, target_base_url, model=target_model
                     )
                 except Exception as e:
                     LOGGER.error(
                         "Failed to instantiate evaluation client '%s': %s",
-                        eval_client_id,
+                        target_client_id,
                         e,
                     )
                     return dataset
@@ -445,7 +450,7 @@ class AccuracyAnalysis(AnalysisProvider):
 
         # 3. Execute scoring
         results = {}
-        max_workers = 10  # Conservative limit
+        max_workers = 100  # Increased from 10 for faster evaluation
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {

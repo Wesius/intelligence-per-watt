@@ -9,7 +9,8 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Any, Sequence
+from queue import Queue
+from typing import Any, Iterable, Iterator, Sequence
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -32,8 +33,11 @@ class _AsyncLoopRunner:
         self._thread.start()
 
     def run(self, coro) -> Any:
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        future = self.submit(coro)
         return future.result()
+
+    def submit(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def shutdown(self) -> None:
         if not self._loop.is_closed():
@@ -112,6 +116,68 @@ class VLLMClient(InferenceClient):
             )
         )
 
+    def run_concurrent(
+        self,
+        model: str,
+        prompt_iter: Iterable[tuple[int, str]],
+        max_in_flight: int,
+        **params: Any,
+    ) -> Iterator[tuple[int, Response]]:
+        if self._closed:
+            raise RuntimeError("vLLM client has been closed")
+        self._ensure_engine(model)
+
+        runner = self._loop_runner
+        if runner is None:
+            raise RuntimeError("vLLM client is shut down")
+        prompt_iterator = iter(prompt_iter)
+        max_requests = max(1, int(max_in_flight))
+        done_queue: Queue[Any] = Queue()
+        inflight: dict[Any, int] = {}
+
+        def _submit_prompt(idx: int, prompt: str) -> None:
+            sampling_params = self._build_sampling_params(params)
+            request_id = str(uuid.uuid4())
+            future = runner.submit(
+                self._stream_response(
+                    prompt=prompt,
+                    request_id=request_id,
+                    sampling_params=sampling_params,
+                )
+            )
+            inflight[future] = idx
+
+            def _on_done(fut) -> None:
+                done_queue.put((idx, fut))
+
+            future.add_done_callback(_on_done)
+
+        exhausted = False
+        while True:
+            while not exhausted and len(inflight) < max_requests:
+                try:
+                    index, prompt = next(prompt_iterator)
+                except StopIteration:
+                    exhausted = True
+                    break
+                _submit_prompt(index, prompt)
+
+            if not inflight:
+                break
+
+            index, fut = done_queue.get()
+            try:
+                response = fut.result()
+            except Exception:
+                for pending in list(inflight):
+                    if pending is not fut:
+                        pending.cancel()
+                inflight.pop(fut, None)
+                raise
+
+            inflight.pop(fut, None)
+            yield index, response
+
     def list_models(self) -> Sequence[str]:
         return [self._model_name] if self._model_name else []
 
@@ -151,6 +217,7 @@ class VLLMClient(InferenceClient):
         except Exception as exc:  # pragma: no cover - forwarded to caller
             raise RuntimeError(f"Failed to initialize vLLM engine: {exc}") from exc
         self._model_name = model
+
 
     def _build_sampling_params(self, params: Mapping[str, Any]):
         recognized = {
@@ -202,6 +269,7 @@ class VLLMClient(InferenceClient):
         if self._engine is None:
             raise RuntimeError("vLLM engine is not initialized")
 
+        wall_start = time.time()
         start_time = time.perf_counter()
         prompt_tokens: int | None = None
         completion_tokens = 0
@@ -260,6 +328,7 @@ class VLLMClient(InferenceClient):
         ) as exc:  # pragma: no cover - actual streaming exercised in integration
             raise RuntimeError(f"vLLM offline generation failed: {exc}") from exc
 
+        wall_end = time.time()
         usage = ChatUsage(
             prompt_tokens=prompt_tokens or 0,
             completion_tokens=completion_tokens,
@@ -267,5 +336,9 @@ class VLLMClient(InferenceClient):
         )
         content = "".join(content_parts)
         return Response(
-            content=content, usage=usage, time_to_first_token_ms=ttft_ms or 0.0
+            content=content,
+            usage=usage,
+            time_to_first_token_ms=ttft_ms or 0.0,
+            request_start_time=wall_start,
+            request_end_time=wall_end,
         )

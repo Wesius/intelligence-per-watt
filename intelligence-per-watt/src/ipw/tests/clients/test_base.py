@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 import pytest
 from ipw.clients.base import InferenceClient
@@ -15,13 +15,34 @@ class ConcreteClient(InferenceClient):
     client_id = "test"
     client_name = "Test Client"
 
+    def run_concurrent(
+        self,
+        model: str,
+        prompt_iter: Iterable[tuple[int, str]],
+        max_in_flight: int,
+        **params: Any,
+    ) -> Iterator[tuple[int, Response]]:
+        for index, _prompt in prompt_iter:
+            yield index, Response(
+                content="test response",
+                usage=ChatUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+                time_to_first_token_ms=100.0,
+                request_start_time=0.0,
+                request_end_time=1.0,
+            )
+
     def stream_chat_completion(
-        self, model: str, prompt: str, **params: Any
+        self,
+        model: str,
+        prompt: str,
+        **params: Any,
     ) -> Response:
         return Response(
-            content="test response",
+            content=f"test response for {prompt}",
             usage=ChatUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             time_to_first_token_ms=100.0,
+            request_start_time=0.0,
+            request_end_time=1.0,
         )
 
     def list_models(self) -> Sequence[str]:
@@ -70,8 +91,8 @@ class TestInferenceClient:
         # All methods should work
         assert client.health() is True
         assert client.list_models() == ["model1", "model2"]
-        response = client.stream_chat_completion("model", "prompt")
-        assert response.content == "test response"
+        responses = list(client.run_concurrent("model", [(0, "prompt")], 1))
+        assert responses[0][1].content == "test response"
 
     def test_passes_params_to_implementation(self) -> None:
         class ParamsTestClient(InferenceClient):
@@ -79,17 +100,24 @@ class TestInferenceClient:
             client_name = "Params Test"
             received_params = {}
 
-            def stream_chat_completion(
-                self, model: str, prompt: str, **params: Any
-            ) -> Response:
+            def run_concurrent(
+                self,
+                model: str,
+                prompt_iter: Iterable[tuple[int, str]],
+                max_in_flight: int,
+                **params: Any,
+            ) -> Iterator[tuple[int, Response]]:
                 self.received_params = params
-                return Response(
-                    content="test",
-                    usage=ChatUsage(
-                        prompt_tokens=1, completion_tokens=1, total_tokens=2
-                    ),
-                    time_to_first_token_ms=100.0,
-                )
+                for item in prompt_iter:
+                    yield item[0], Response(
+                        content="test",
+                        usage=ChatUsage(
+                            prompt_tokens=1, completion_tokens=1, total_tokens=2
+                        ),
+                        time_to_first_token_ms=100.0,
+                        request_start_time=0.0,
+                        request_end_time=1.0,
+                    )
 
             def list_models(self) -> Sequence[str]:
                 return []
@@ -97,8 +125,32 @@ class TestInferenceClient:
             def health(self) -> bool:
                 return True
 
+            def stream_chat_completion(
+                self,
+                model: str,
+                prompt: str,
+                **params: Any,
+            ) -> Response:
+                return Response(
+                    content="streamed",
+                    usage=ChatUsage(
+                        prompt_tokens=1, completion_tokens=1, total_tokens=2
+                    ),
+                    time_to_first_token_ms=100.0,
+                    request_start_time=0.0,
+                    request_end_time=1.0,
+                )
+
         client = ParamsTestClient("http://localhost")
-        client.stream_chat_completion("model", "prompt", temperature=0.7, top_p=0.9)
+        list(
+            client.run_concurrent(
+                "model",
+                [(0, "prompt")],
+                max_in_flight=1,
+                temperature=0.7,
+                top_p=0.9,
+            )
+        )
 
         assert client.received_params["temperature"] == 0.7
         assert client.received_params["top_p"] == 0.9

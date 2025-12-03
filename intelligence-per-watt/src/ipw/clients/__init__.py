@@ -17,6 +17,7 @@ _CLIENT_CLASS_MAP = (
     ("openai", "ipw.clients.openai", "OpenAIClient", None),
     ("ollama", "ipw.clients.ollama", "OllamaClient", "ollama"),
     ("vllm", "ipw.clients.vllm", "VLLMClient", "vllm"),
+    ("mlx", "ipw.clients.mlx", "MLXClient", "mlx-lm"),
 )
 
 

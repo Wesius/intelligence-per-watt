@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Dict, Optional, Sequence
 
 import requests
 from requests import exceptions as req_exc
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 
 from ..core.registry import ClientRegistry
@@ -37,26 +40,58 @@ class OpenAIClient(InferenceClient):
         super().__init__(host, **config)
         # Model defaults to the recommended judge if unspecified
         self.model = model_cfg
-        self.timeout_seconds = float(config.get("timeout_seconds", 60.0))
+        self.timeout_seconds = float(config.get("timeout_seconds", 600.0))
 
         # Generation controls are intentionally omitted for judge calls (GPT-5 family ignores them)
         self.temperature = None
         self.max_output_tokens = None
 
+        # Initialize session with connection pooling and retries
+        self._session = requests.Session()
+        
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=1,  # 1s, 2s, 4s, 8s, 16s
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["POST"],
+            raise_on_status=False,
+            # Retry on connection errors (like RemoteDisconnected)
+            connect=True,
+            read=True,
+        )
+        
+        # Support high concurrency (100+ threads)
+        adapter = HTTPAdapter(
+            pool_connections=100, 
+            pool_maxsize=100, 
+            max_retries=retry_strategy
+        )
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
+
+    def close(self) -> None:
+        """Clean up resources."""
+        if hasattr(self, "_session"):
+            self._session.close()
+
     def stream_chat_completion(
         self, model: str, prompt: str, **params: Any
     ) -> Response:
-        """Profiling is not supported with this client."""
-        raise RuntimeError(
-            "OpenAIClient is evaluation-only; do not use it for profiling. "
-            "Use a profiling client like ollama or vllm instead."
+        """
+        OpenAIClient is strictly for evaluation (judging) and does not support
+        profiling or streaming metrics.
+        """
+        raise NotImplementedError(
+            "OpenAIClient is eval-only and does not support stream_chat_completion."
         )
 
     def list_models(self) -> Sequence[str]:
-        raise RuntimeError("OpenAIClient is evaluation-only and cannot list models.")
+        """OpenAIClient cannot list models; use the configured model."""
+        raise NotImplementedError("OpenAIClient does not support listing models.")
 
     def health(self) -> bool:
-        raise RuntimeError("OpenAIClient is evaluation-only and does not expose health checks.")
+        """OpenAIClient does not expose a health check endpoint."""
+        raise NotImplementedError("OpenAIClient does not support health checks.")
 
     def chat(
         self,
@@ -116,8 +151,9 @@ class OpenAIClient(InferenceClient):
             if k not in exclude_keys:
                 payload[k] = v
 
+        wall_start = time.time()
         try:
-            response = requests.post(
+            response = self._session.post(
                 url,
                 headers=headers,
                 data=json.dumps(payload),
@@ -144,11 +180,14 @@ class OpenAIClient(InferenceClient):
             raise RuntimeError("OpenAIClient received non-JSON response") from exc
 
         choices = data.get("choices") or []
+        wall_end = time.time()
         if not choices:
             return Response(
                 content="",
                 usage=ChatUsage(0, 0, 0),
                 time_to_first_token_ms=0.0,
+                request_start_time=wall_start,
+                request_end_time=wall_end,
             )
 
         first = choices[0]
@@ -159,6 +198,8 @@ class OpenAIClient(InferenceClient):
             content=content,
             usage=ChatUsage(0, 0, 0),
             time_to_first_token_ms=0.0,
+            request_start_time=wall_start,
+            request_end_time=wall_end,
         )
 
 

@@ -24,6 +24,7 @@ dependencies = [
     "tqdm>=4.66",
     "hf_transfer",
     "python-dotenv",
+    "mlx-lm"
 ]
 
 [project.optional-dependencies]

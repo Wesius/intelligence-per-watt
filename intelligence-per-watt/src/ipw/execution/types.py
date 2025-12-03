@@ -75,10 +75,13 @@ class ModelMetrics:
 
 @dataclass(slots=True)
 class ProfilingRecord:
+    dataset_index: int
     problem: str
     answer: str
-    dataset_metadata: MutableMapping[str, object] = field(default_factory=dict)
+    request_start_time: float | None = None
+    request_end_time: float | None = None
     subject: str = ""
+    dataset_metadata: MutableMapping[str, object] = field(default_factory=dict)
     model_answers: MutableMapping[str, str] = field(default_factory=dict)
     model_metrics: MutableMapping[str, ModelMetrics] = field(default_factory=dict)
 

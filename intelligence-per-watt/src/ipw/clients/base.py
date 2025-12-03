@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Iterator
 from typing import Any, Sequence
+import time
 
 from ..core.types import Response
 
@@ -24,13 +26,35 @@ class InferenceClient(ABC):
     def stream_chat_completion(
         self, model: str, prompt: str, **params: Any
     ) -> Response:
-        """Run a streamed chat completion and return the aggregated response.
-
-        Implementations should consume a streaming API so they can measure
-        time-to-first-token latency, but must return a fully materialized
-        ``Response`` object once the stream finishes. ``prompt`` contains the
-        raw text to submit to the inference service.
         """
+        Run a streamed chat completion and return the aggregated response.
+
+        Implementations must populate usage, time_to_first_token_ms, and may also
+        provide request_start_time/request_end_time for precise wall timings.
+        """
+
+    def run_concurrent(
+        self,
+        model: str,
+        prompt_iter: Iterable[tuple[int, str]],
+        max_in_flight: int,
+        **params: Any,
+    ) -> Iterator[tuple[int, Response]]:
+        """
+        Default sequential implementation that wraps ``stream_chat_completion``.
+
+        Clients can override for true concurrency. request_start/end timestamps
+        are filled if the underlying implementation does not populate them.
+        """
+        for index, prompt in prompt_iter:
+            wall_start = time.time()
+            response = self.stream_chat_completion(model, prompt, **params)
+            wall_end = time.time()
+            if response.request_start_time is None:
+                response.request_start_time = wall_start
+            if response.request_end_time is None:
+                response.request_end_time = wall_end
+            yield index, response
 
     @abstractmethod
     def list_models(self) -> Sequence[str]:

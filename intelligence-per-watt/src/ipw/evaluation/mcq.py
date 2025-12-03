@@ -87,7 +87,8 @@ class BaseMCQHandler(EvaluationHandler):
 
         candidate = self._extract_answer_with_llm(problem, model_answer, valid_letters)
         if not candidate:
-            return None, {"reason": "no_choice_letter_extracted"}
+            # If extraction fails, treat as incorrect instead of unevaluated
+            return False, {"reason": "no_choice_letter_extracted", "is_correct": False}
 
         is_correct = candidate == ref
         meta = {

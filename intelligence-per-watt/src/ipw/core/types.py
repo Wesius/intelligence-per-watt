@@ -21,6 +21,8 @@ class Response:
     content: str
     usage: ChatUsage
     time_to_first_token_ms: float
+    request_start_time: float | None = None
+    request_end_time: float | None = None
 
 
 @dataclass(slots=True)
@@ -46,6 +48,7 @@ class ProfilerConfig:
     model: str = ""
     output_dir: Path | None = None
     max_queries: int | None = None
+    max_concurrency: int = 1
     additional_parameters: Mapping[str, Any] = field(default_factory=dict)
 
 

@@ -31,6 +31,14 @@ def _collect_params(ctx, param, values):
 @click.option("--dataset", "dataset_id", default="ipw", help="Dataset identifier")
 @click.option("--client-base-url", help="Client base URL")
 @click.option(
+    "--max-concurrency",
+    "max_concurrency",
+    type=click.IntRange(min=0),
+    default=1,
+    show_default=True,
+    help="Maximum number of concurrent inference requests (0 for all)",
+)
+@click.option(
     "--eval-client",
     help="Evaluation client identifier (judge)",
     default="openai",
@@ -67,6 +75,7 @@ def profile(
     client_id: str,
     client_base_url: str | None,
     model: str,
+    max_concurrency: int,
     dataset_param,
     client_param,
     output_dir: str | None,
@@ -101,6 +110,7 @@ def profile(
         dataset_params=dataset_param,
         client_params=client_param,
         model=model,
+        max_concurrency=max_concurrency,
         max_queries=max_queries,
         output_dir=Path(output_dir) if output_dir else None,
     )
