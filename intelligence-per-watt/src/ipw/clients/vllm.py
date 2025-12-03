@@ -78,7 +78,12 @@ class VLLMClient(InferenceClient):
 
     def __init__(self, base_url: str | None = None, **config: Any) -> None:
         super().__init__(base_url or self.DEFAULT_BASE_URL, **config)
-        self._engine_kwargs: dict[str, Any] = {}
+        
+        # Pass all config arguments to the engine, coercing types where necessary
+        self._engine_kwargs: dict[str, Any] = {
+            k: self._coerce_value(v) for k, v in config.items()
+        }
+        
         self._sampling_defaults: dict[str, Any] = {
             "max_tokens": 4096,
             "temperature": 0.6,
@@ -92,6 +97,23 @@ class VLLMClient(InferenceClient):
         self._loop_runner: _AsyncLoopRunner | None = _AsyncLoopRunner()
         self._closed = False
         atexit.register(self.close)
+
+    @staticmethod
+    def _coerce_value(value: Any) -> Any:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return text
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                # Support boolean strings that aren't valid JSON
+                if text.lower() == "true":
+                    return True
+                if text.lower() == "false":
+                    return False
+                return text
+        return value
 
     def prepare(self, model: str) -> None:
         if self._closed:
@@ -235,23 +257,12 @@ class VLLMClient(InferenceClient):
             "length_penalty",
         }
 
-        def _coerce(value: Any) -> Any:
-            if isinstance(value, str):
-                text = value.strip()
-                if not text:
-                    return text
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    return text
-            return value
-
         overrides: dict[str, Any] = {}
         for key, value in params.items():
             if key.startswith("sampling_"):
-                overrides[key.split("_", 1)[1]] = _coerce(value)
+                overrides[key.split("_", 1)[1]] = self._coerce_value(value)
             elif key in recognized:
-                overrides[key] = _coerce(value)
+                overrides[key] = self._coerce_value(value)
 
         sampling = {**self._sampling_defaults, **overrides}
         if "stop" in sampling:
