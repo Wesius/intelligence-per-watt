@@ -101,6 +101,13 @@ def run_benchmark(model: str) -> bool:
         model,
         *COMMON_ARGS,
     ]
+    
+    # Add fp8 quantization only for Gemma model
+    if "gemma" in model.lower():
+        cmd.extend([
+            "--client-param",
+            "quantization=fp8",
+        ])
 
     start_time = datetime.now()
 
