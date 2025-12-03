@@ -34,8 +34,6 @@ COMMON_ARGS = [
     "0",
     "--client-param",
     "tensor_parallel_size=8",
-    "--client-param",
-    "quantization=fp8",
 ]
 
 
