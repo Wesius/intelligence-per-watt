@@ -28,9 +28,9 @@ dependencies = [
 
 [project.optional-dependencies]
 ollama = ["ollama"]
-vllm = ["vllm>=0.11.0"]
+vllm = ["vllm==0.11.2"]
 mlx = ["mlx-lm"]
-all = ["ollama", "vllm>=0.11.0", "mlx-lm"]
+all = ["ollama", "vllm==0.11.2", "mlx-lm"]
 
 [project.scripts]
 ipw = "ipw.cli:main"
