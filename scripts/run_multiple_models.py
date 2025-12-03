@@ -19,23 +19,9 @@ STATE_FILE = STATE_DIR / "run_state.json"
 
 # Configure your models here
 MODELS = [
-    "Qwen/Qwen3-4B",
-    "Qwen/Qwen3-8B",
-    "Qwen/Qwen3-14B",
-    "Qwen/Qwen3-32B",
-    "Qwen/Qwen3-30B-A3B",
-    "Qwen/Qwen3-235B-A22B",
-    "google/gemma-3-1b-it",
-    "google/gemma-3-4b-it",
-    "google/gemma-3-12b-it",
-    "openai/gpt-oss-20b",
+    "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
     "openai/gpt-oss-120b",
-    "ibm-granite/granite-4.0-micro",
-    "ibm-granite/granite-4.0-h-micro",
-    "ibm-granite/granite-4.0-h-tiny",
-    "ibm-granite/granite-4.0-h-small",
-    "meta-llama/Llama-3.1-8B-Instruct",
-    "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "google/gemma-3-27b-it",
 ]
 
 # Common arguments for all benchmark runs
@@ -43,7 +29,13 @@ COMMON_ARGS = [
     "--client",
     "vllm",
     "--dataset",
-    "ipw",
+    "ipw-pro",
+    "--max-concurrency",
+    "0",
+    "--client-param",
+    "tensor_parallel_size=8",
+    "--client-param",
+    "quantization=fp8",
 ]
 
 

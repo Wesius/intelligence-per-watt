@@ -24,13 +24,13 @@ dependencies = [
     "tqdm>=4.66",
     "hf_transfer",
     "python-dotenv",
-    "mlx-lm"
 ]
 
 [project.optional-dependencies]
 ollama = ["ollama"]
 vllm = ["vllm>=0.11.0"]
-all = ["ollama", "vllm>=0.11.0"]
+mlx = ["mlx-lm"]
+all = ["ollama", "vllm>=0.11.0", "mlx-lm"]
 
 [project.scripts]
 ipw = "ipw.cli:main"
