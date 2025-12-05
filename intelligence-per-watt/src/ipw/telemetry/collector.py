@@ -20,7 +20,7 @@ class EnergyMonitorCollector:
         target: str = DEFAULT_TARGET,
         *,
         channel_options: Optional[Tuple[Tuple[str, str], ...]] = None,
-        timeout: float = 5.0,
+        timeout: float = 15.0,
     ) -> None:
         self._target = normalize_target(target or DEFAULT_TARGET)
         self._channel_options = channel_options or ()
