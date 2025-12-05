@@ -32,7 +32,7 @@ def normalize_target(target: str) -> str:
     return target
 
 
-def wait_for_ready(target: str = DEFAULT_TARGET, *, timeout: float = 5.0) -> bool:
+def wait_for_ready(target: str = DEFAULT_TARGET, *, timeout: float = 15.0) -> bool:
     """Return True when the energy monitor responds to a health check."""
 
     normalized = normalize_target(target)
@@ -53,7 +53,7 @@ def launch_monitor(
     args: Sequence[str] | None = None,
     *,
     env: Mapping[str, str] | None = None,
-    timeout: float = 5.0,
+    timeout: float = 15.0,
     target: str = DEFAULT_TARGET,
 ) -> tuple[int, str]:
     """Launch the energy monitor and wait for it to become ready.
@@ -93,7 +93,7 @@ def launch_monitor(
 def ensure_monitor(
     target: str = DEFAULT_TARGET,
     *,
-    timeout: float = 5.0,
+    timeout: float = 15.0,
     launch: bool = True,
     launch_args: Sequence[str] | None = None,
     env: MutableMapping[str, str] | None = None,
