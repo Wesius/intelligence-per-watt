@@ -70,6 +70,12 @@ def _collect_params(ctx, param, values):
 )
 @click.option("--output-dir", type=click.Path())
 @click.option("--max-queries", type=int)
+@click.option(
+    "--no-eval",
+    is_flag=True,
+    default=False,
+    help="Skip post-run accuracy evaluation.",
+)
 def profile(
     dataset_id: str,
     client_id: str,
@@ -83,6 +89,7 @@ def profile(
     eval_client: str | None,
     eval_base_url: str | None,
     eval_model: str | None,
+    no_eval: bool,
 ) -> None:
     """Execute profiling run with the execution pipeline."""
     import ipw.analysis
@@ -131,8 +138,12 @@ def profile(
     runner = ProfilerRunner(config)
     runner.run()
     success("Profiling run completed")
-    
+
     # Post-run analysis
+    if no_eval:
+        info("Skipping post-run evaluation (--no-eval)")
+        return
+
     results_dir = runner._output_path
     if results_dir and results_dir.exists():
         info("Running post-profile analysis...")
